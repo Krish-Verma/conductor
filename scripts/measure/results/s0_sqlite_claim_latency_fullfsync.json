@@ -1,0 +1,699 @@
+{
+  "meta": {
+    "script": "/Users/krishverma/Documents/Conductor/scripts/measure/s0_sqlite_claim_latency.py",
+    "started_utc": "2026-08-12T19:25:24Z",
+    "python": "3.14.6",
+    "sqlite_library_version": "3.53.3",
+    "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "cpu_count": 10,
+    "mp_start_method": "spawn",
+    "temp_dir": "/var/folders/6c/zlyy9xz11gx6kly82c3cgkwh0000gn/T/conductor_s0_o3uocn4u",
+    "rows": 300,
+    "repeat": 2,
+    "writer_counts": [
+      1,
+      4,
+      16
+    ],
+    "lease_ms": 30000,
+    "max_retries": 200,
+    "think_ms": 1.0,
+    "fullfsync": true,
+    "claim_mode": "returning",
+    "begin_mode": "IMMEDIATE",
+    "state_guard": true,
+    "negative_control": false,
+    "returning_probe_ok": true,
+    "returning_probe_error": null,
+    "pragmas_requested": {
+      "journal_mode": "WAL",
+      "synchronous": "FULL",
+      "foreign_keys": "ON",
+      "busy_timeout": "5000"
+    },
+    "percentile_method": "linear interpolation on sorted successful-claim latencies",
+    "latency_definition": "wall time of BEGIN IMMEDIATE -> claim -> INSERT event -> COMMIT, successful claims only"
+  },
+  "summary": [
+    {
+      "writers": 1,
+      "repeats": 2,
+      "iterations": 602,
+      "claims": 600,
+      "busy_errors": 0,
+      "integrity_errors": 0,
+      "duplicate_claims": 0,
+      "other_error_count": 0,
+      "other_errors": {},
+      "latency": {
+        "count": 600,
+        "min_ms": 1.143750036135316,
+        "median_ms": 2.74689553771168,
+        "mean_ms": 2.744743203317436,
+        "p95_ms": 3.959906008094549,
+        "p99_ms": 4.851259385468435,
+        "max_ms": 16.84166700579226
+      },
+      "active_writers_mean": 1.0,
+      "max_worker_share_mean": 1.0,
+      "throughput_claims_per_s_mean": 235.0822825649721,
+      "invariants_all_pass": true,
+      "invariant_failures": []
+    },
+    {
+      "writers": 4,
+      "repeats": 2,
+      "iterations": 608,
+      "claims": 600,
+      "busy_errors": 0,
+      "integrity_errors": 0,
+      "duplicate_claims": 0,
+      "other_error_count": 0,
+      "other_errors": {},
+      "latency": {
+        "count": 600,
+        "min_ms": 0.9562500054016709,
+        "median_ms": 2.7959374710917473,
+        "mean_ms": 12.649855636797534,
+        "p95_ms": 40.109053894411744,
+        "p99_ms": 258.47405664157117,
+        "max_ms": 674.614957999438
+      },
+      "active_writers_mean": 4.0,
+      "max_worker_share_mean": 0.395,
+      "throughput_claims_per_s_mean": 236.0779859734435,
+      "invariants_all_pass": true,
+      "invariant_failures": []
+    },
+    {
+      "writers": 16,
+      "repeats": 2,
+      "iterations": 632,
+      "claims": 600,
+      "busy_errors": 0,
+      "integrity_errors": 0,
+      "duplicate_claims": 0,
+      "other_error_count": 0,
+      "other_errors": {},
+      "latency": {
+        "count": 600,
+        "min_ms": 1.1524579022079706,
+        "median_ms": 4.873146011959761,
+        "mean_ms": 32.618238746072166,
+        "p95_ms": 142.0034417184069,
+        "p99_ms": 571.7383826442519,
+        "max_ms": 881.4044999890029
+      },
+      "active_writers_mean": 14.5,
+      "max_worker_share_mean": 0.14833333333333332,
+      "throughput_claims_per_s_mean": 205.97067805452528,
+      "invariants_all_pass": true,
+      "invariant_failures": []
+    }
+  ],
+  "runs": [
+    {
+      "writers": 1,
+      "repeat": 0,
+      "rows": 300,
+      "mode": "returning",
+      "think_ms": 1.0,
+      "fullfsync": true,
+      "active_writers": 1,
+      "idle_writers": 0,
+      "max_worker_share": 1.0,
+      "iterations": 301,
+      "claims": 300,
+      "empty_attempts": 1,
+      "busy_errors": 0,
+      "integrity_errors": 0,
+      "other_errors": {},
+      "duplicate_claims": 0,
+      "wall_s": 1.2443620420526713,
+      "throughput_claims_per_s": 241.08739246427578,
+      "latency": {
+        "count": 300,
+        "min_ms": 1.182542066089809,
+        "median_ms": 2.74695799453184,
+        "mean_ms": 2.6832853141240776,
+        "p95_ms": 3.7012958666309714,
+        "p99_ms": 4.497502245940267,
+        "max_ms": 5.462417029775679
+      },
+      "per_worker_claims": {
+        "0": 300
+      },
+      "worker_exitcodes": [
+        0
+      ],
+      "fatals": [],
+      "invariants": {
+        "I1_no_duplicate_ownership": {
+          "pass": true,
+          "total_claims_recorded_by_workers": 300,
+          "rows_seeded": 300,
+          "duplicate_run_ids": {},
+          "distinct_ids_claimed": 300,
+          "db_running": 300,
+          "db_ready": 0,
+          "db_total": 300,
+          "event_rows": 300,
+          "event_distinct_run_ids": 300,
+          "event_wrong_kind": 0,
+          "orphan_events": 0
+        },
+        "I2_no_partial_transition": {
+          "pass": true,
+          "running_with_null_lease_owner": 0,
+          "ready_with_lease_owner": 0,
+          "running_with_null_lease_expires_at": 0,
+          "running_without_claim_event": 0
+        },
+        "I3_lease_epoch_exactly_one": {
+          "pass": true,
+          "rows_with_epoch_not_1": 0,
+          "epoch_min": 1,
+          "epoch_max": 1,
+          "returned_epochs_not_1": 0
+        },
+        "I4_integrity_check": {
+          "pass": true,
+          "integrity_check": [
+            "ok"
+          ],
+          "foreign_key_check_violations": 0
+        },
+        "all_pass": true
+      },
+      "pragmas": {
+        "journal_mode": "wal",
+        "synchronous": 2,
+        "foreign_keys": 1,
+        "busy_timeout": 5000,
+        "page_size": 4096,
+        "fullfsync": 1,
+        "checkpoint_fullfsync": 1,
+        "wal_autocheckpoint": 1000,
+        "checkpoint_fullfsync_effective": 1
+      }
+    },
+    {
+      "writers": 1,
+      "repeat": 1,
+      "rows": 300,
+      "mode": "returning",
+      "think_ms": 1.0,
+      "fullfsync": true,
+      "active_writers": 1,
+      "idle_writers": 0,
+      "max_worker_share": 1.0,
+      "iterations": 301,
+      "claims": 300,
+      "empty_attempts": 1,
+      "busy_errors": 0,
+      "integrity_errors": 0,
+      "other_errors": {},
+      "duplicate_claims": 0,
+      "wall_s": 1.3096023340476677,
+      "throughput_claims_per_s": 229.07717266566846,
+      "latency": {
+        "count": 300,
+        "min_ms": 1.143750036135316,
+        "median_ms": 2.7466455358080566,
+        "mean_ms": 2.8062010925107947,
+        "p95_ms": 4.153639561263844,
+        "p99_ms": 5.37250003311783,
+        "max_ms": 16.84166700579226
+      },
+      "per_worker_claims": {
+        "0": 300
+      },
+      "worker_exitcodes": [
+        0
+      ],
+      "fatals": [],
+      "invariants": {
+        "I1_no_duplicate_ownership": {
+          "pass": true,
+          "total_claims_recorded_by_workers": 300,
+          "rows_seeded": 300,
+          "duplicate_run_ids": {},
+          "distinct_ids_claimed": 300,
+          "db_running": 300,
+          "db_ready": 0,
+          "db_total": 300,
+          "event_rows": 300,
+          "event_distinct_run_ids": 300,
+          "event_wrong_kind": 0,
+          "orphan_events": 0
+        },
+        "I2_no_partial_transition": {
+          "pass": true,
+          "running_with_null_lease_owner": 0,
+          "ready_with_lease_owner": 0,
+          "running_with_null_lease_expires_at": 0,
+          "running_without_claim_event": 0
+        },
+        "I3_lease_epoch_exactly_one": {
+          "pass": true,
+          "rows_with_epoch_not_1": 0,
+          "epoch_min": 1,
+          "epoch_max": 1,
+          "returned_epochs_not_1": 0
+        },
+        "I4_integrity_check": {
+          "pass": true,
+          "integrity_check": [
+            "ok"
+          ],
+          "foreign_key_check_violations": 0
+        },
+        "all_pass": true
+      },
+      "pragmas": {
+        "journal_mode": "wal",
+        "synchronous": 2,
+        "foreign_keys": 1,
+        "busy_timeout": 5000,
+        "page_size": 4096,
+        "fullfsync": 1,
+        "checkpoint_fullfsync": 1,
+        "wal_autocheckpoint": 1000,
+        "checkpoint_fullfsync_effective": 1
+      }
+    },
+    {
+      "writers": 4,
+      "repeat": 0,
+      "rows": 300,
+      "mode": "returning",
+      "think_ms": 1.0,
+      "fullfsync": true,
+      "active_writers": 4,
+      "idle_writers": 0,
+      "max_worker_share": 0.45,
+      "iterations": 304,
+      "claims": 300,
+      "empty_attempts": 4,
+      "busy_errors": 0,
+      "integrity_errors": 0,
+      "other_errors": {},
+      "duplicate_claims": 0,
+      "wall_s": 1.2764426249777898,
+      "throughput_claims_per_s": 235.0281901665733,
+      "latency": {
+        "count": 300,
+        "min_ms": 1.1654580011963844,
+        "median_ms": 2.7806455036625266,
+        "mean_ms": 13.02468973173139,
+        "p95_ms": 30.243343790061896,
+        "p99_ms": 258.5000599804334,
+        "max_ms": 469.7889999952167
+      },
+      "per_worker_claims": {
+        "1": 135,
+        "2": 40,
+        "0": 43,
+        "3": 82
+      },
+      "worker_exitcodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "fatals": [],
+      "invariants": {
+        "I1_no_duplicate_ownership": {
+          "pass": true,
+          "total_claims_recorded_by_workers": 300,
+          "rows_seeded": 300,
+          "duplicate_run_ids": {},
+          "distinct_ids_claimed": 300,
+          "db_running": 300,
+          "db_ready": 0,
+          "db_total": 300,
+          "event_rows": 300,
+          "event_distinct_run_ids": 300,
+          "event_wrong_kind": 0,
+          "orphan_events": 0
+        },
+        "I2_no_partial_transition": {
+          "pass": true,
+          "running_with_null_lease_owner": 0,
+          "ready_with_lease_owner": 0,
+          "running_with_null_lease_expires_at": 0,
+          "running_without_claim_event": 0
+        },
+        "I3_lease_epoch_exactly_one": {
+          "pass": true,
+          "rows_with_epoch_not_1": 0,
+          "epoch_min": 1,
+          "epoch_max": 1,
+          "returned_epochs_not_1": 0
+        },
+        "I4_integrity_check": {
+          "pass": true,
+          "integrity_check": [
+            "ok"
+          ],
+          "foreign_key_check_violations": 0
+        },
+        "all_pass": true
+      },
+      "pragmas": {
+        "journal_mode": "wal",
+        "synchronous": 2,
+        "foreign_keys": 1,
+        "busy_timeout": 5000,
+        "page_size": 4096,
+        "fullfsync": 1,
+        "checkpoint_fullfsync": 1,
+        "wal_autocheckpoint": 1000,
+        "checkpoint_fullfsync_effective": 1
+      }
+    },
+    {
+      "writers": 4,
+      "repeat": 1,
+      "rows": 300,
+      "mode": "returning",
+      "think_ms": 1.0,
+      "fullfsync": true,
+      "active_writers": 4,
+      "idle_writers": 0,
+      "max_worker_share": 0.34,
+      "iterations": 304,
+      "claims": 300,
+      "empty_attempts": 4,
+      "busy_errors": 0,
+      "integrity_errors": 0,
+      "other_errors": {},
+      "duplicate_claims": 0,
+      "wall_s": 1.2651406669756398,
+      "throughput_claims_per_s": 237.12778178031368,
+      "latency": {
+        "count": 300,
+        "min_ms": 0.9562500054016709,
+        "median_ms": 2.8318334952928126,
+        "mean_ms": 12.27502154186368,
+        "p95_ms": 40.22277889307592,
+        "p99_ms": 161.77621950278896,
+        "max_ms": 674.614957999438
+      },
+      "per_worker_claims": {
+        "1": 64,
+        "0": 66,
+        "3": 68,
+        "2": 102
+      },
+      "worker_exitcodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "fatals": [],
+      "invariants": {
+        "I1_no_duplicate_ownership": {
+          "pass": true,
+          "total_claims_recorded_by_workers": 300,
+          "rows_seeded": 300,
+          "duplicate_run_ids": {},
+          "distinct_ids_claimed": 300,
+          "db_running": 300,
+          "db_ready": 0,
+          "db_total": 300,
+          "event_rows": 300,
+          "event_distinct_run_ids": 300,
+          "event_wrong_kind": 0,
+          "orphan_events": 0
+        },
+        "I2_no_partial_transition": {
+          "pass": true,
+          "running_with_null_lease_owner": 0,
+          "ready_with_lease_owner": 0,
+          "running_with_null_lease_expires_at": 0,
+          "running_without_claim_event": 0
+        },
+        "I3_lease_epoch_exactly_one": {
+          "pass": true,
+          "rows_with_epoch_not_1": 0,
+          "epoch_min": 1,
+          "epoch_max": 1,
+          "returned_epochs_not_1": 0
+        },
+        "I4_integrity_check": {
+          "pass": true,
+          "integrity_check": [
+            "ok"
+          ],
+          "foreign_key_check_violations": 0
+        },
+        "all_pass": true
+      },
+      "pragmas": {
+        "journal_mode": "wal",
+        "synchronous": 2,
+        "foreign_keys": 1,
+        "busy_timeout": 5000,
+        "page_size": 4096,
+        "fullfsync": 1,
+        "checkpoint_fullfsync": 1,
+        "wal_autocheckpoint": 1000,
+        "checkpoint_fullfsync_effective": 1
+      }
+    },
+    {
+      "writers": 16,
+      "repeat": 0,
+      "rows": 300,
+      "mode": "returning",
+      "think_ms": 1.0,
+      "fullfsync": true,
+      "active_writers": 14,
+      "idle_writers": 2,
+      "max_worker_share": 0.13,
+      "iterations": 316,
+      "claims": 300,
+      "empty_attempts": 16,
+      "busy_errors": 0,
+      "integrity_errors": 0,
+      "other_errors": {},
+      "duplicate_claims": 0,
+      "wall_s": 1.5211911670630798,
+      "throughput_claims_per_s": 197.21387192853703,
+      "latency": {
+        "count": 300,
+        "min_ms": 1.2083339970558882,
+        "median_ms": 5.935020511969924,
+        "mean_ms": 33.14714166296957,
+        "p95_ms": 142.13461257750174,
+        "p99_ms": 571.7383826442519,
+        "max_ms": 762.1565419249237
+      },
+      "per_worker_claims": {
+        "4": 24,
+        "13": 24,
+        "6": 5,
+        "0": 39,
+        "15": 17,
+        "2": 30,
+        "5": 31,
+        "10": 16,
+        "8": 30,
+        "14": 22,
+        "1": 15,
+        "3": 34,
+        "11": 7,
+        "12": 0,
+        "7": 6,
+        "9": 0
+      },
+      "worker_exitcodes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "fatals": [],
+      "invariants": {
+        "I1_no_duplicate_ownership": {
+          "pass": true,
+          "total_claims_recorded_by_workers": 300,
+          "rows_seeded": 300,
+          "duplicate_run_ids": {},
+          "distinct_ids_claimed": 300,
+          "db_running": 300,
+          "db_ready": 0,
+          "db_total": 300,
+          "event_rows": 300,
+          "event_distinct_run_ids": 300,
+          "event_wrong_kind": 0,
+          "orphan_events": 0
+        },
+        "I2_no_partial_transition": {
+          "pass": true,
+          "running_with_null_lease_owner": 0,
+          "ready_with_lease_owner": 0,
+          "running_with_null_lease_expires_at": 0,
+          "running_without_claim_event": 0
+        },
+        "I3_lease_epoch_exactly_one": {
+          "pass": true,
+          "rows_with_epoch_not_1": 0,
+          "epoch_min": 1,
+          "epoch_max": 1,
+          "returned_epochs_not_1": 0
+        },
+        "I4_integrity_check": {
+          "pass": true,
+          "integrity_check": [
+            "ok"
+          ],
+          "foreign_key_check_violations": 0
+        },
+        "all_pass": true
+      },
+      "pragmas": {
+        "journal_mode": "wal",
+        "synchronous": 2,
+        "foreign_keys": 1,
+        "busy_timeout": 5000,
+        "page_size": 4096,
+        "fullfsync": 1,
+        "checkpoint_fullfsync": 1,
+        "wal_autocheckpoint": 1000,
+        "checkpoint_fullfsync_effective": 1
+      }
+    },
+    {
+      "writers": 16,
+      "repeat": 1,
+      "rows": 300,
+      "mode": "returning",
+      "think_ms": 1.0,
+      "fullfsync": true,
+      "active_writers": 15,
+      "idle_writers": 1,
+      "max_worker_share": 0.16666666666666666,
+      "iterations": 316,
+      "claims": 300,
+      "empty_attempts": 16,
+      "busy_errors": 0,
+      "integrity_errors": 0,
+      "other_errors": {},
+      "duplicate_claims": 0,
+      "wall_s": 1.3971197080099955,
+      "throughput_claims_per_s": 214.72748418051353,
+      "latency": {
+        "count": 300,
+        "min_ms": 1.1524579022079706,
+        "median_ms": 3.7273955531418324,
+        "mean_ms": 32.089335829174765,
+        "p95_ms": 125.69380169152303,
+        "p99_ms": 469.8187428910732,
+        "max_ms": 881.4044999890029
+      },
+      "per_worker_claims": {
+        "10": 24,
+        "5": 21,
+        "14": 10,
+        "7": 14,
+        "6": 31,
+        "9": 19,
+        "2": 50,
+        "13": 2,
+        "11": 28,
+        "4": 26,
+        "12": 6,
+        "15": 38,
+        "1": 11,
+        "0": 15,
+        "8": 0,
+        "3": 5
+      },
+      "worker_exitcodes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "fatals": [],
+      "invariants": {
+        "I1_no_duplicate_ownership": {
+          "pass": true,
+          "total_claims_recorded_by_workers": 300,
+          "rows_seeded": 300,
+          "duplicate_run_ids": {},
+          "distinct_ids_claimed": 300,
+          "db_running": 300,
+          "db_ready": 0,
+          "db_total": 300,
+          "event_rows": 300,
+          "event_distinct_run_ids": 300,
+          "event_wrong_kind": 0,
+          "orphan_events": 0
+        },
+        "I2_no_partial_transition": {
+          "pass": true,
+          "running_with_null_lease_owner": 0,
+          "ready_with_lease_owner": 0,
+          "running_with_null_lease_expires_at": 0,
+          "running_without_claim_event": 0
+        },
+        "I3_lease_epoch_exactly_one": {
+          "pass": true,
+          "rows_with_epoch_not_1": 0,
+          "epoch_min": 1,
+          "epoch_max": 1,
+          "returned_epochs_not_1": 0
+        },
+        "I4_integrity_check": {
+          "pass": true,
+          "integrity_check": [
+            "ok"
+          ],
+          "foreign_key_check_violations": 0
+        },
+        "all_pass": true
+      },
+      "pragmas": {
+        "journal_mode": "wal",
+        "synchronous": 2,
+        "foreign_keys": 1,
+        "busy_timeout": 5000,
+        "page_size": 4096,
+        "fullfsync": 1,
+        "checkpoint_fullfsync": 1,
+        "wal_autocheckpoint": 1000,
+        "checkpoint_fullfsync_effective": 1
+      }
+    }
+  ]
+}

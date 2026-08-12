@@ -1,0 +1,94 @@
+{
+  "corpus_size": 31,
+  "should_block": 25,
+  "should_allow": 6,
+  "results": {
+    "naive": {
+      "true_positive": 18,
+      "false_negative": 7,
+      "true_negative": 3,
+      "false_positive": 3,
+      "bypasses": [
+        {
+          "command": "git  push",
+          "shape": "double-space"
+        },
+        {
+          "command": "git -c http.sslVerify=false push",
+          "shape": "global flag before subcommand"
+        },
+        {
+          "command": "git --no-pager push",
+          "shape": "global flag before subcommand"
+        },
+        {
+          "command": "$(echo git) push",
+          "shape": "command substitution"
+        },
+        {
+          "command": "`echo git` push",
+          "shape": "backtick substitution"
+        },
+        {
+          "command": "g=git; $g push",
+          "shape": "variable indirection"
+        },
+        {
+          "command": "base64 -d <<< 'Z2l0IHB1c2g=' | sh",
+          "shape": "encoded"
+        }
+      ],
+      "false_alarms": [
+        {
+          "command": "echo 'do not git push'",
+          "shape": "mentions phrase in a string"
+        },
+        {
+          "command": "cat README.md  # explains git push",
+          "shape": "phrase in a comment"
+        },
+        {
+          "command": "grep -r 'git push' docs/",
+          "shape": "phrase as a search term"
+        }
+      ]
+    },
+    "normalized": {
+      "true_positive": 18,
+      "false_negative": 7,
+      "true_negative": 6,
+      "false_positive": 0,
+      "bypasses": [
+        {
+          "command": "$(echo git) push",
+          "shape": "command substitution"
+        },
+        {
+          "command": "`echo git` push",
+          "shape": "backtick substitution"
+        },
+        {
+          "command": "g=git; $g push",
+          "shape": "variable indirection"
+        },
+        {
+          "command": "printf 'git push' | sh",
+          "shape": "pipe to shell"
+        },
+        {
+          "command": "echo 'git push' > /tmp/p.sh && sh /tmp/p.sh",
+          "shape": "write-then-execute"
+        },
+        {
+          "command": "alias gp='git push'; gp",
+          "shape": "alias"
+        },
+        {
+          "command": "base64 -d <<< 'Z2l0IHB1c2g=' | sh",
+          "shape": "encoded"
+        }
+      ],
+      "false_alarms": []
+    }
+  }
+}
