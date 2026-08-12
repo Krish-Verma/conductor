@@ -1,0 +1,21 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/conductor-core",
+    "crates/conductor-store",
+    "crates/conductor-cli",
+]
+
+# Crates are created by the slice that owns them (CLAUDE.md: an empty skeleton
+# creates false architectural commitments). conductor-git, conductor-agent and
+# conductor-run belong to S2/S3+ and do not exist yet.
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+[workspace.dependencies]
+conductor-core = { path = "crates/conductor-core" }
+conductor-store = { path = "crates/conductor-store" }

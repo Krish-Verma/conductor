@@ -1,0 +1,226 @@
+//! Forward-only migrations: ordered, idempotent, transactional, and verified by
+//! `integrity_check` after each applied step.
+
+mod common;
+
+use std::collections::BTreeSet;
+
+use conductor_store::migrate::{MIGRATIONS, current_version, migrate, pending};
+use conductor_store::{Store, StoreError};
+
+fn table_names(store: &Store) -> BTreeSet<String> {
+    let mut stmt = store
+        .conn()
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+        .expect("prepare");
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query");
+    rows.map(|r| r.expect("row")).collect()
+}
+
+fn index_names(store: &Store) -> BTreeSet<String> {
+    let mut stmt = store
+        .conn()
+        .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+        .expect("prepare");
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query");
+    rows.map(|r| r.expect("row")).collect()
+}
+
+#[test]
+fn migrate_applies_schema_v1_and_records_the_version() {
+    let (_dir, store) = common::temp_store();
+    assert_eq!(store.schema_version().expect("version"), Some(1));
+
+    let rows: i64 = store
+        .conn()
+        .query_row("SELECT COUNT(*) FROM schema_version", [], |row| row.get(0))
+        .expect("count");
+    assert_eq!(rows, 1);
+
+    let applied_at: i64 = store
+        .conn()
+        .query_row(
+            "SELECT applied_at FROM schema_version WHERE version = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("applied_at");
+    assert!(applied_at > 0, "applied_at must be a real timestamp");
+}
+
+#[test]
+fn schema_v1_contains_exactly_the_tables_and_indexes_of_part_5_1() {
+    let (_dir, store) = common::temp_store();
+
+    let expected_tables: BTreeSet<String> = [
+        "approval_grant",
+        "approval_request",
+        "artifact",
+        "attempt",
+        "containment_probe",
+        "decision",
+        "event",
+        "finding",
+        "plan_version",
+        "policy_snapshot",
+        "project",
+        "run",
+        "schema_version",
+        "side_effect",
+        "task",
+        "verification_check",
+        "workspace",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    assert_eq!(table_names(&store), expected_tables);
+
+    let indexes = index_names(&store);
+    for expected in [
+        "ix_run_one_active_per_task",
+        "ix_run_claim",
+        "ix_event_run",
+        "ix_verif_cache",
+        "ix_grant_binding",
+    ] {
+        assert!(
+            indexes.contains(expected),
+            "missing index {expected}; have {indexes:?}"
+        );
+    }
+}
+
+#[test]
+fn the_run_table_has_exactly_the_columns_the_claim_depends_on() {
+    let (_dir, store) = common::temp_store();
+    let mut stmt = store
+        .conn()
+        .prepare("SELECT name FROM pragma_table_info('run') ORDER BY cid")
+        .expect("prepare");
+    let columns: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query")
+        .map(|r| r.expect("row"))
+        .collect();
+    assert_eq!(
+        columns,
+        vec![
+            "id",
+            "task_id",
+            "policy_hash",
+            "workspace_id",
+            "base_commit",
+            "run_branch",
+            "state",
+            "priority",
+            "lease_owner",
+            "lease_expires_at",
+            "lease_epoch",
+            "created_at",
+        ]
+    );
+}
+
+#[test]
+fn migrate_is_idempotent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("conductor.db");
+    let mut store = Store::open_or_create(&path).expect("open");
+
+    let before = table_names(&store);
+    let steps = migrate(store.conn_mut()).expect("second migrate must not error");
+    assert_eq!(steps.len(), MIGRATIONS.len());
+    assert!(
+        steps.iter().all(|s| !s.applied),
+        "a second migrate must apply nothing: {steps:?}"
+    );
+    assert_eq!(table_names(&store), before);
+
+    let rows: i64 = store
+        .conn()
+        .query_row("SELECT COUNT(*) FROM schema_version", [], |row| row.get(0))
+        .expect("count");
+    assert_eq!(rows, 1, "schema_version must not gain duplicate rows");
+
+    // ...and re-opening (which migrates) is equally a no-op.
+    drop(store);
+    let store = Store::open_or_create(&path).expect("reopen");
+    assert_eq!(store.schema_version().expect("version"), Some(1));
+    assert_eq!(table_names(&store), before);
+}
+
+#[test]
+fn integrity_check_is_run_and_is_ok_after_each_applied_migration() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("conductor.db");
+    let mut conn = rusqlite::Connection::open(&path).expect("raw open");
+    conductor_store::schema::apply_pragmas(&conn).expect("pragmas");
+
+    let steps = migrate(&mut conn).expect("migrate");
+    assert_eq!(steps.len(), MIGRATIONS.len());
+    for step in &steps {
+        assert!(step.applied, "first migrate must apply every migration");
+        assert_eq!(
+            step.integrity_check.as_deref(),
+            Some(["ok".to_string()].as_slice()),
+            "migration {} must be followed by integrity_check = ok",
+            step.version
+        );
+    }
+}
+
+#[test]
+fn pending_reports_work_before_and_nothing_after() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("conductor.db");
+    let mut conn = rusqlite::Connection::open(&path).expect("raw open");
+    conductor_store::schema::apply_pragmas(&conn).expect("pragmas");
+
+    assert_eq!(current_version(&conn).expect("version"), None);
+    assert_eq!(pending(&conn).expect("pending").len(), MIGRATIONS.len());
+
+    migrate(&mut conn).expect("migrate");
+
+    assert_eq!(current_version(&conn).expect("version"), Some(1));
+    assert!(pending(&conn).expect("pending").is_empty());
+}
+
+#[test]
+fn a_database_from_the_future_is_refused_not_downgraded() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("conductor.db");
+    {
+        let store = Store::open_or_create(&path).expect("open");
+        store
+            .conn()
+            .execute(
+                "INSERT INTO schema_version (version, applied_at) VALUES (99, 1)",
+                [],
+            )
+            .expect("insert future version");
+    }
+
+    let err = Store::open_or_create(&path).expect_err("must refuse a future schema");
+    match err {
+        StoreError::SchemaTooNew { found, supported } => {
+            assert_eq!(found, 99);
+            assert_eq!(supported, 1);
+        }
+        other => panic!("expected SchemaTooNew, got {other:?}"),
+    }
+}
+
+#[test]
+fn migrations_are_ordered_and_versions_are_unique() {
+    let versions: Vec<i64> = MIGRATIONS.iter().map(|m| m.version).collect();
+    let mut sorted = versions.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(versions, sorted, "migrations must be ascending and unique");
+    assert_eq!(versions.first(), Some(&1));
+}

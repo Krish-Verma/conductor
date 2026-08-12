@@ -1,0 +1,23 @@
+[package]
+name = "conductor-cli"
+description = "Conductor command-line interface."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "conductor"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.6", features = ["derive"] }
+conductor-core.workspace = true
+conductor-store.workspace = true
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
+[dev-dependencies]
+serde_json = "1.0.151"
+tempfile = "3.27.0"

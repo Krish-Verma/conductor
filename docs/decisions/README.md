@@ -38,7 +38,7 @@ specification. Decision records are the durable evidence behind individual claim
 in it.
 
 **They must not duplicate each other.** Where a measurement is already recorded in
-master plan Part 0 (the `M1`–`M17` table), the ADR states the decision and its
+master plan Part 0 (the `M1`–`M27` table), the ADR states the decision and its
 revisit trigger and *cites* the Part 0 row rather than restating the numbers. Two
 copies of a number are two things that can disagree.
 
@@ -50,3 +50,4 @@ copies of a number are two things that can disagree.
 | [ADR-0002](ADR-0002-execution-containment.md) | Execution containment is measured per (adapter × launcher), never declared | ACCEPTED |
 | [ADR-0003](ADR-0003-claude-hook-reliability.md) | Claude Code `PreToolUse` hooks are audit-grade, not gate-grade | ACCEPTED |
 | [ADR-0004](ADR-0004-sqlite-claim-safety.md) | `BEGIN IMMEDIATE` single-statement claim is the run-claim mechanism | ACCEPTED |
+| [ADR-0005](ADR-0005-claim-latency-is-load-dependent.md) | The claim holds under `rusqlite`; its latency trigger was measuring offered load | ACCEPTED |

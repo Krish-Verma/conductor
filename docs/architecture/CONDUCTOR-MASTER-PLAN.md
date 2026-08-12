@@ -49,6 +49,11 @@ These are experimental results from this machine, not assumptions. Everything in
 | **M20** | `--settings` alone is **not** hermetic; `--setting-sources` is required | ambient `SessionStart` hooks fired until `--setting-sources project` was added (ADR-0003) |
 | **M21** | `BEGIN IMMEDIATE` claim: zero duplicate ownership | 38,800+ claims across 1/4/16 writer processes, 4 configurations, 0 dupes (ADR-0004) |
 | **M22** | `synchronous=FULL` is **not** media-durable on macOS | `fullfsync=1` needed for `F_FULLSYNC`; median 0.065 ms → 2.733 ms (ADR-0004) |
+| **M23** | Claim correctness survives the stack change to `rusqlite` | 39,400 claims, 1/4/16 writers, 5 configurations, **0 duplicates**, 0 invariant failures (ADR-0005) |
+| **M24** | **p99 claim latency is a function of offered load, not of the mechanism** | 4 writers, `fullfsync=1`: 265 ms saturated → **24.6 ms** at a 25 ms inter-claim gap; median flat at 3.4 ms (ADR-0005) |
+| **M25** | `fullfsync=1` is genuinely applied by `rusqlite`, not silently dropped | reads back `1`; ~9× median cost vs `fullfsync=0` (3.44 vs 0.36 ms at 4w) corroborates `F_FULLSYNC` (ADR-0005) |
+| **M26** | Worst-case claim latency moved 1093 ms → **5147 ms** under `rusqlite` | 16 writers saturated; narrows the 60 s lease margin from ~55× to **~12×** (ADR-0005) |
+| **M27** | Three of Part 5.1's six pragmas are already the dependency's defaults | `libsqlite3-sys` compiles `-DSQLITE_DEFAULT_FOREIGN_KEYS=1`; `rusqlite` calls `sqlite3_busy_timeout(db,5000)` on open; `synchronous` sits at SQLite's compile default. Readback alone is weak evidence; `fullfsync` is the discriminating pragma (ADR-0005) |
 
 **Two prior claims were refuted by these measurements** and the architecture below reflects the corrected position: (a) that a default local clone is an isolation boundary — it is not (M2); (b) that a `0600` unix socket plus environment scrubbing constitutes a human-only approval channel — it does not, except under a sandboxed launcher (M10/M11).
 
@@ -251,11 +256,18 @@ Conductor has ten hard problems. A workflow engine removes two.
 1. Execution spans more than one machine. *(The real trigger — everything else is downstream.)*
 2. More than 3 concurrent human operators against shared state.
 3. Sustained >50 concurrent runs, or **p99 claim latency >100 ms at ≤4 concurrent
-   writers with `fullfsync=1`, measured under `rusqlite`**. (Scoped deliberately:
-   unscoped, this trigger already fires today at a concurrency Conductor will never
-   reach — 116.8 ms at 4 writers, 778 ms at 16 — and would argue for adopting Temporal
-   for no reason. Currently 116.8 ms under Python/SQLite 3.53.3; **S1 must re-measure
-   under `rusqlite`**, which links a different SQLite build. ADR-0004.)
+   writers with `fullfsync=1` under `rusqlite`, measured at an inter-claim gap ≥25 ms
+   per worker**. **Currently 24.6 ms** (ADR-0005, measured at S1).
+   *(Scoped twice, each time because the previous wording fired for the wrong reason.
+   ADR-0004 added the durability mode and concurrency after the unscoped version fired
+   at a concurrency Conductor will never reach. ADR-0005 added the **arrival rate**:
+   without it the trigger is satisfied by any benchmark that saturates the writer —
+   under saturation this same configuration reaches 265 ms — and would then recommend
+   Temporal, whose durable-write path is a Postgres round-trip plus a network hop and
+   would make the measured quantity **worse**. A trigger whose firing recommends an
+   action that worsens what it measures is measuring the wrong thing. Saturation
+   numbers are retained in ADR-0005 as the worst-case ceiling; they are not this
+   trigger.)*
 4. A single run must stay suspended >30 days across daemon/OS upgrades.
 5. **Runtime bug-fixes exceed 15% of commits over any 30-day window**, measured from `git log`. *(This is the falsification trigger for the decision itself.)*
 6. Cross-run orchestration graphs — fan-out/fan-in with joins — rather than a sequential task queue.
@@ -690,7 +702,23 @@ INSERT INTO event(run_id, seq, kind, payload) VALUES (…, 'RUN_CLAIMED', …);
 COMMIT;
 ```
 
+> **Contradiction, owned by S3 (surfaced at S1).** The predicate selects
+> `state IN ('READY','RECOVERING')`, but `RECOVERING` **is not one of the twelve task
+> states in §5.2**, and the run state "mirrors its task". Half the claim's own
+> predicate can therefore never match. §5.2's restart rule forces crashed runs to
+> `RECONCILING`, not `RECOVERING`, so the intended reclaim predicate is most likely
+> `state IN ('READY','RECONCILING')` — a `RECONCILING` run whose lease has expired is
+> exactly what a restarting worker must be able to take, and the existing
+> `lease_expires_at` clause already protects a live worker's run.
+>
+> **S1 shipped the statement verbatim rather than guessing**, because the reclaim path
+> is S3's design surface and the S1 measurement had to measure the statement as
+> specified. This is safe today only because nothing writes `RECOVERING`, so the dead
+> disjunct matches no row. **S3 must resolve it and re-verify the claim measurement.**
+
 **`lease_epoch` is the fencing token.** Every subsequent write by that worker carries its epoch and is rejected if the epoch moved. Without fencing, a process that stalls past its lease and then wakes will happily write over its successor's work.
+
+**Lease duration is coupled to worst-case claim latency**, and the coupling is measured, not assumed: the 60 s lease must exceed the worst starvation window, which S1 measured at **5147 ms** under `rusqlite` (up from 1093 ms in S0) — a ~12× margin. Do not shrink the lease without re-deriving this (M26, ADR-0005).
 
 **Leases:** 60 s. **Heartbeat:** every 15 s, **conditional on the agent process still existing** (`kill(pid, 0)`) — a supervisor that heartbeats while its child is dead is worse than one that crashes.
 
@@ -909,7 +937,9 @@ CREATE TABLE event (
   payload TEXT NOT NULL,
   at      INTEGER NOT NULL
 );
-CREATE INDEX ix_event_run ON event(run_id, seq);
+-- UNIQUE, not plain: a duplicate claim must fail at INSERT time rather than be
+-- recorded and noticed later by an offline checker (M23, ADR-0005).
+CREATE UNIQUE INDEX ix_event_run ON event(run_id, seq);
 
 CREATE TABLE verification_check (
   id                    TEXT PRIMARY KEY,
@@ -1030,7 +1060,7 @@ Terminal: `COMPLETE`, `CANCELLED`, `SUPERSEDED`.
 **Invalid:** `RUNNING → COMPLETE`; any `→ COMPLETE` without verification bound to the final tree hash.
 **Restart:** anything in `RUNNING`/`RECONCILING`/`VERIFYING` with an expired lease is forced to `RECONCILING`.
 
-### Attempt (7 states)
+### Attempt (8 states)
 
 ```
 CREATED → STARTING → ACTIVE ─┬─► EXITED     ─┐
@@ -1040,6 +1070,14 @@ CREATED → STARTING → ACTIVE ─┬─► EXITED     ─┐
 ```
 
 `STALE` ≠ `CRASHED`. `CRASHED` means we observed a nonzero exit; `STALE` means **we do not know**, and unknown must not be recorded as known. Every path ends at `RECONCILED` — an attempt is never finished until Conductor has looked at the repository.
+
+> **Open, owned by S3 (surfaced at S1).** The `attempt` table (Part 5.1) has **no
+> `state` column** — only `outcome`, whose five values cover `EXITED|CRASHED|TIMED_OUT|
+> STALE|RECONCILED`. `CREATED`, `STARTING` and `ACTIVE` are therefore not persistable,
+> so a supervisor cannot currently record that an attempt is in flight — which is
+> exactly what startup recovery must read. S3 owns the fix (a forward migration adding
+> `attempt.state`); S1 deliberately did not pre-empt it, because S3 knows what the
+> supervisor actually needs.
 
 ### Approval (5 states)
 
@@ -1323,7 +1361,16 @@ Report: `docs/reports/S0-completion-report.md`.
 
 ---
 
-### S1 — Store foundation
+### S1 — Store foundation  ✅ **COMPLETE 2026-08-12**
+
+**Outcome.** Workspace + `conductor-core`/`-store`/`-cli`; schema v1 verbatim from
+Part 5.1 (one amendment: `ix_event_run` is now UNIQUE); forward-only migrations;
+`BEGIN IMMEDIATE` helper; the §4.7 claim; `conductor doctor` green. 52 tests.
+ADR-0005 records the mandatory `rusqlite` re-measurement: **39,400 claims, 0
+duplicates**, and the finding that p99 tracks offered load, which re-scoped §2.6
+trigger 3. Two state-machine contradictions surfaced and were routed to S3 (see §4.7,
+§5.2). Report: `docs/reports/S1-completion-report.md`.
+**Not proven:** power-loss durability. `SIGKILL` ×100 proves crash atomicity only.
 
 **Objective.** Schema v1, migrations, transaction helpers, `conductor doctor`.
 **Dependencies.** S0/Q2.

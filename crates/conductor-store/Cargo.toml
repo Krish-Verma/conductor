@@ -1,0 +1,17 @@
+[package]
+name = "conductor-store"
+description = "SQLite store for Conductor: schema, forward-only migrations, transactions, run claim."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+conductor-core.workspace = true
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+
+[dev-dependencies]
+tempfile = "3.27.0"
