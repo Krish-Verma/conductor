@@ -44,6 +44,11 @@ These are experimental results from this machine, not assumptions. Everything in
 | **M15** | Codex propagates exit codes | `exit 42` → 42 |
 | **M16** | Claude Code 2.1.228 has **no** `--permission-prompt-tool` | absent from `--help` |
 | **M17** | Claude Code `PreToolUse` hooks can deny a tool call | observed directly: a hook blocked `WebFetch` and returned a redirect message |
+| **M18** | `PreToolUse` fire rate for Bash is 100%, and the hook sees the raw command | 10/10 Bash tool calls invoked the hook, incl. `sh -c '…'` and `cd . && …` (ADR-0003) |
+| **M19** | Hook bypass confirmed end-to-end, not theorized | `$(echo git) push` and `g=git; $g push` passed the hook and reached git (ADR-0003) |
+| **M20** | `--settings` alone is **not** hermetic; `--setting-sources` is required | ambient `SessionStart` hooks fired until `--setting-sources project` was added (ADR-0003) |
+| **M21** | `BEGIN IMMEDIATE` claim: zero duplicate ownership | 38,800+ claims across 1/4/16 writer processes, 4 configurations, 0 dupes (ADR-0004) |
+| **M22** | `synchronous=FULL` is **not** media-durable on macOS | `fullfsync=1` needed for `F_FULLSYNC`; median 0.065 ms → 2.733 ms (ADR-0004) |
 
 **Two prior claims were refuted by these measurements** and the architecture below reflects the corrected position: (a) that a default local clone is an isolation boundary — it is not (M2); (b) that a `0600` unix socket plus environment scrubbing constitutes a human-only approval channel — it does not, except under a sandboxed launcher (M10/M11).
 
@@ -245,7 +250,12 @@ Conductor has ten hard problems. A workflow engine removes two.
 **Revisit triggers** (any one):
 1. Execution spans more than one machine. *(The real trigger — everything else is downstream.)*
 2. More than 3 concurrent human operators against shared state.
-3. Sustained >50 concurrent runs, or p99 claim latency >100 ms.
+3. Sustained >50 concurrent runs, or **p99 claim latency >100 ms at ≤4 concurrent
+   writers with `fullfsync=1`, measured under `rusqlite`**. (Scoped deliberately:
+   unscoped, this trigger already fires today at a concurrency Conductor will never
+   reach — 116.8 ms at 4 writers, 778 ms at 16 — and would argue for adopting Temporal
+   for no reason. Currently 116.8 ms under Python/SQLite 3.53.3; **S1 must re-measure
+   under `rusqlite`**, which links a different SQLite build. ADR-0004.)
 4. A single run must stay suspended >30 days across daemon/OS upgrades.
 5. **Runtime bug-fixes exceed 15% of commits over any 30-day window**, measured from `git log`. *(This is the falsification trigger for the decision itself.)*
 6. Cross-run orchestration graphs — fan-out/fan-in with joins — rather than a sequential task queue.
@@ -430,7 +440,7 @@ struct ExecutionCapabilities {
 | `network_egress` | n/a | **Hard** (M9) | **None** | *unverified* |
 | `control_surface` | n/a | **Hard** (M10, M11) | **None** | *unverified* |
 | `credential_read` | n/a | **None** (M12) | **None** | *unverified* |
-| `tool_interception` | n/a | not investigated | **Restricted** (M17, bypassable) | Restricted |
+| `tool_interception` | n/a | not investigated | **Restricted** — measured, not assumed (M17–M19) | Restricted |
 
 FakeAgent is Conductor's own code and not an adversary; recording it as `Hard` would be a category error.
 
@@ -793,8 +803,15 @@ Any unexplained delta raises a `Finding`. **Findings never auto-resolve.**
 ```sql
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous  = FULL;      -- this DB is the recovery record
+PRAGMA fullfsync    = 1;         -- REQUIRED on macOS: synchronous=FULL issues fsync(),
+PRAGMA checkpoint_fullfsync = 1; -- which does not flush the drive write cache. F_FULLSYNC
+                                 -- does. Costs median 0.065ms -> 2.733ms (M22, ADR-0004);
+                                 -- irrelevant at Conductor's claim rate, and it is what
+                                 -- the "recovery record" justification above actually requires.
 PRAGMA foreign_keys = ON;
-PRAGMA busy_timeout = 5000;
+PRAGMA busy_timeout = 5000;      -- NOTE: busy_timeout absorbs contention into LATENCY,
+                                 -- not into errors. busy_errors=0 is not evidence of low
+                                 -- contention (ADR-0004). Budget p99, never median.
 
 CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
 
@@ -1116,7 +1133,13 @@ Verified against `claude --help`, v2.1.228:
 
 **Not available:** `--permission-prompt-tool` (M16), OS sandbox. **Do not use `--bare` for real runs** — it skips hook loading and would disable interception; it is for the fake-agent harness only.
 
-**Hook integration:** Conductor writes a per-run settings JSON containing a `PreToolUse` hook invoking `conductor hook`, which evaluates the run's policy snapshot and returns allow/deny. `--include-hook-events` puts every decision in the event stream. **Known bypasses must be documented at the same place in the code:** a `Bash(git push*)` deny is defeated by `sh -c 'git push'`, by script-then-execute, by `git -c … push`, or by any spelling the matcher did not anticipate. Hooks are a speed bump and an audit trail, not a boundary.
+**Hook integration** (measured — ADR-0003). Conductor writes a per-run settings JSON containing a `PreToolUse` hook invoking `conductor hook`, which evaluates the run's policy snapshot and returns allow/deny. Three requirements, each from measurement:
+
+- **`matcher: "Bash"` with no `if` filter.** The `if` field is a *pre-filter*: if its pattern does not match, the hook never runs and Conductor never sees the command. Using it makes the audit channel exactly as leaky as the pattern. Conductor takes every Bash call and classifies it itself.
+- **`--setting-sources project`** is mandatory. `--settings` alone is not hermetic — ambient user-level hooks still fire (M20).
+- **`--include-hook-events`** with `--output-format stream-json` emits paired `system/hook_started` and `system/hook_response` events. This is the audit trail, and it is the main reason to install hooks at all.
+
+Measured: **100% fire rate** on Bash, with the raw command string delivered intact including `sh -c '…'` and `cd . && …` (M18). A normalized classifier catches direct, wrapper, chain, absolute-path and git-global-flag forms with **zero false positives**. **Known bypasses, confirmed end-to-end rather than theorized** (M19): `$(echo git) push` and `g=git; $g push` both passed the hook and reached `git`. The whole surviving class is the one requiring shell evaluation to resolve — command substitution, backticks, variable indirection, pipe-to-shell, write-then-execute, alias, encoded. **Hooks are an audit channel and a speed bump, never a boundary**, which is why `tool_interception` can never satisfy an `execution_requirements` clause (§4.2).
 
 **Ships at its measured tier** (`None` across all four gating dimensions), therefore eligible only for tasks that pass §4.2's gate at that tier. `execution_requirements` is never weakened to accommodate it. "Sandboxed Claude" — a Conductor-authored `sandbox-exec` profile permitting only the Anthropic API endpoint — is separate, later, and measured.
 
@@ -1280,7 +1303,11 @@ Each slice is one focused unit of work. Hard gates are marked. Every slice ends 
 
 ---
 
-### S0 — Measurement and pre-registered falsification
+### S0 — Measurement and pre-registered falsification  ✅ **COMPLETE 2026-08-12**
+
+**Outcome.** Both questions answered. ADR-0001 … ADR-0004 written. Master plan amended
+in four places (Part 0 M18–M22, Part 5.1 pragmas, §2.6 trigger 3, §6.3 hook integration).
+Report: `docs/reports/S0-completion-report.md`.
 
 **Objective.** Answer the two remaining empirical questions; record all findings (including M1–M17 from prior passes) as ADRs with falsification triggers.
 **Why now.** Two decisions still rest on unmeasured claims. The prior pass found two experiments whose first design was wrong and produced *false permissive* results — that is the failure mode this slice exists to catch.
