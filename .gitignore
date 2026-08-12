@@ -1,0 +1,27 @@
+# Rust (from S1 onward)
+/target/
+**/*.rs.bk
+
+# Measurement scratch dirs — the scripts build disposable fixtures in place.
+# Raw results under scripts/measure/results/ ARE committed: they are the evidence
+# behind the decision records.
+scripts/measure/gitexp/
+scripts/measure/sbx/
+scripts/measure/bigsrc/
+scripts/measure/*.tmp/
+
+# Local Conductor runtime state must never be committed.
+# Execution history, workspaces, agent transcripts and logs are local and disposable
+# by design (master plan §3.1); .conductor/ itself IS tracked.
+.conductor/local/
+*.db
+*.db-wal
+*.db-shm
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
