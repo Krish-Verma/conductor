@@ -53,6 +53,8 @@ These are experimental results from this machine, not assumptions. Everything in
 | **M24** | **p99 claim latency is a function of offered load, not of the mechanism** | 4 writers, `fullfsync=1`: 265 ms saturated → **24.6 ms** at a 25 ms inter-claim gap; median flat at 3.4 ms (ADR-0005) |
 | **M25** | `fullfsync=1` is genuinely applied by `rusqlite`, not silently dropped | reads back `1`; ~9× median cost vs `fullfsync=0` (3.44 vs 0.36 ms at 4w) corroborates `F_FULLSYNC` (ADR-0005) |
 | **M26** | Worst-case claim latency moved 1093 ms → **5147 ms** under `rusqlite` | 16 writers saturated; narrows the 60 s lease margin from ~55× to **~12×** (ADR-0005) |
+| **M28** | Claude Code under `codex sandbox` measures **identical to Codex** on all four gating dimensions | Restricted/Hard/Hard/None, exceptions `/tmp`+`$TMPDIR`. Confirms containment is a launcher property (M13). Does **not** show Claude *functions* there — the same sandbox denies the network it needs (S2.5) |
+| **M29** | macOS scans a freshly built binary on first execution: **21.7 s cold vs 3.3 s warm** | Caused a probe to exceed its deadline under parallel test load; the harness correctly reported `broken` rather than a false `Hard`. Matters for every slice that spawns a new binary (S3+) |
 | **M27** | Three of Part 5.1's six pragmas are already the dependency's defaults | `libsqlite3-sys` compiles `-DSQLITE_DEFAULT_FOREIGN_KEYS=1`; `rusqlite` calls `sqlite3_busy_timeout(db,5000)` on open; `synchronous` sits at SQLite's compile default. Readback alone is weak evidence; `fullfsync` is the discriminating pragma (ADR-0005) |
 
 **Two prior claims were refuted by these measurements** and the architecture below reflects the corrected position: (a) that a default local clone is an isolation boundary — it is not (M2); (b) that a `0600` unix socket plus environment scrubbing constitutes a human-only approval channel — it does not, except under a sandboxed launcher (M10/M11).
@@ -448,13 +450,17 @@ struct ExecutionCapabilities {
 
 **Measured classification:**
 
-| | FakeAgent | **Codex** `--sandbox workspace-write` | **Claude Code** (bare) | Claude + sandbox launcher |
+| | FakeAgent | **Codex** `--sandbox workspace-write` | **Claude Code** (bare) | Claude + `codex sandbox` launcher |
 |---|---|---|---|---|
-| `filesystem_write` | n/a | **Restricted** — `/tmp`, `$TMPDIR` (M6–M8) | **None** | *unverified* |
-| `network_egress` | n/a | **Hard** (M9) | **None** | *unverified* |
-| `control_surface` | n/a | **Hard** (M10, M11) | **None** | *unverified* |
-| `credential_read` | n/a | **None** (M12) | **None** | *unverified* |
-| `tool_interception` | n/a | not investigated | **Restricted** — measured, not assumed (M17–M19) | Restricted |
+| `filesystem_write` | n/a | **Restricted** — `/tmp`, `$TMPDIR` (M6–M8) | **None** | **Restricted** — `/tmp`, `$TMPDIR` (M28) |
+| `network_egress` | n/a | **Hard** (M9) | **None** | **Hard** (M28) |
+| `control_surface` | n/a | **Hard** (M10, M11) | **None** | **Hard** (M28) |
+| `credential_read` | n/a | **None** (M12) | **None** | **None** (M28) |
+| `tool_interception` | n/a | not investigated | **Restricted** — measured out-of-band (M17–M19) | Restricted |
+
+**On the fourth column (added at S2.5).** It was *unverified* until the probe harness measured it, and it comes out identical to Codex's — which is what M13 and ADR-0002 predict, since **containment is a property of the launcher, not the agent**. Two caveats must travel with this number or it will be over-read: it measures what the launcher does to an *arbitrary payload*, and it does **not** show that Claude Code actually functions under that launcher — a real Claude run needs network egress, which the same sandbox denies at `Hard`. Eligibility is about what is prevented; usability is a separate question, and "sandboxed Claude" (a Conductor-authored profile permitting only the model endpoint) remains post-v1.
+
+**On `tool_interception` (added at S2.5).** The probe harness **cannot** measure it: a hook only fires inside a live agent session, which costs a model invocation. It is therefore measured **out-of-band** — by S0's live probe (ADR-0003) — and the probe harness reports it as *unmeasured*, never inferring a value. This is safe precisely because it never gates (§4.2's rule), so an unmeasured informational dimension cannot weaken any decision. Do not "fix" the harness by having it guess this row.
 
 FakeAgent is Conductor's own code and not an adversary; recording it as `Hard` would be a category error.
 
@@ -1427,7 +1433,19 @@ left as documented seams, deliberately not stubbed.
 
 ---
 
-### S2.5 — Containment probe harness
+### S2.5 — Containment probe harness  ✅ **COMPLETE 2026-08-12**
+
+**Outcome.** `conductor-core::containment` (the §4.2 model) + `conductor-run/containment/`
+(probe suite, version-triple cache, fail-closed) + `doctor --containment`. 58 new tests
+(198 total). Measured table reproduces §4.2 exactly for Codex; the previously *unverified*
+Claude+launcher column is now measured (M28). **Every denial-based probe has a positive
+control**, and `CaseReport` cannot emit `Denied` without one — a blocked operation with a
+failed control becomes `Broken`. `tool_interception` is structurally unable to gate
+(no `PartialOrd`, no accessor to `Enforcement`, absent from `GatingDimension`; three
+`compile_fail` doctests plus a non-vacuity control doctest).
+Report: `docs/reports/S2.5-completion-report.md`.
+**Not measurable here:** `tool_interception` (needs a live model session — measured
+out-of-band by ADR-0003).
 
 **Objective.** Measure `ExecutionCapabilities` for each (adapter × launcher) on the actual host; cache and fail closed.
 **Why now.** §4.2's eligibility gate is meaningless without measured input, and sandbox behaviour changes under CLI upgrades. **Must precede the first real adapter.**

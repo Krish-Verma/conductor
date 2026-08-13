@@ -1,0 +1,28 @@
+[package]
+name = "conductor-run"
+description = "Conductor runtime. S2.5 scope: the containment probe harness only."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+# The probe's payload: a binary with defined exit codes and a machine-readable
+# result line, run under each (adapter × launcher) being measured. Deliberately
+# not `/bin/sh` — a shell reports "denied" and "could not start" the same way.
+name = "conductor-probe-action"
+path = "src/bin/conductor-probe-action.rs"
+
+[dependencies]
+conductor-core.workspace = true
+conductor-store.workspace = true
+# Same version as conductor-store, so cargo unifies it and no new package enters
+# the lock. Needed because master plan S2.5 places the `containment_probe` cache
+# in this crate, and the store hands out `rusqlite::Connection`.
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+
+[dev-dependencies]
+tempfile = "3.27.0"

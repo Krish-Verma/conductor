@@ -4,12 +4,13 @@ members = [
     "crates/conductor-core",
     "crates/conductor-store",
     "crates/conductor-git",
+    "crates/conductor-run",
     "crates/conductor-cli",
 ]
 
 # Crates are created by the slice that owns them (CLAUDE.md: an empty skeleton
-# creates false architectural commitments). conductor-agent and conductor-run
-# belong to S3+ and do not exist yet.
+# creates false architectural commitments). conductor-run is created by S2.5 and
+# holds only the containment probe harness; conductor-agent belongs to S3.
 
 [workspace.package]
 version = "0.1.0"
@@ -21,3 +22,4 @@ publish = false
 conductor-core = { path = "crates/conductor-core" }
 conductor-store = { path = "crates/conductor-store" }
 conductor-git = { path = "crates/conductor-git" }
+conductor-run = { path = "crates/conductor-run" }

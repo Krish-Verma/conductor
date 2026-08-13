@@ -139,6 +139,7 @@ dependencies = [
  "anyhow",
  "clap",
  "conductor-core",
+ "conductor-run",
  "conductor-store",
  "serde",
  "serde_json",
@@ -159,6 +160,19 @@ name = "conductor-git"
 version = "0.1.0"
 dependencies = [
  "conductor-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "conductor-run"
+version = "0.1.0"
+dependencies = [
+ "conductor-core",
+ "conductor-store",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

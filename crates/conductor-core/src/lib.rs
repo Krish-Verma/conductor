@@ -9,10 +9,12 @@
 //! the one event kind S1 emits. State-transition validation, decision functions
 //! and reconciliation belong to S3/S5 and are deliberately absent.
 
+pub mod containment;
 pub mod event;
 pub mod ids;
 pub mod state;
 
+pub use containment::{Enforcement, ExecutionCapabilities, GatingDimension, Informational};
 pub use event::{EventKind, RunClaimedPayload};
 pub use ids::{
     AttemptId, IdError, PlanVersionId, PolicyHash, ProjectId, RunId, TaskId, WorkspaceId,

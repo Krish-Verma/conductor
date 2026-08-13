@@ -9,12 +9,19 @@
 //!
 //! Absent adapters and absent git are reported as **facts**, not failures: this
 //! machine may legitimately have neither, and S1 does not need them.
+//!
+//! `--containment` (S2.5) is the one place doctor writes: master plan §4.2 makes
+//! this command the thing that *runs* the probe suite and caches it. It still
+//! never creates a database — with no store, the measurement is reported and
+//! the report says why it was not cached.
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use conductor_run::containment::cache;
+use conductor_run::containment::probe::{self, Host, ProbeStatus, SubjectReport};
 use conductor_store::Store;
 use conductor_store::schema::SUPPORTED_SCHEMA_VERSION;
 use serde::Serialize;
@@ -37,6 +44,11 @@ pub struct DoctorArgs {
     /// creates a database.
     #[arg(long)]
     pub init_store: bool,
+
+    /// Measure execution containment for each (adapter × launcher) on this
+    /// host and cache it (§4.2). Runs real subprocesses; invokes no model.
+    #[arg(long)]
+    pub containment: bool,
 }
 
 /// The whole report.
@@ -54,6 +66,26 @@ pub struct Report {
     pub adapters: Vec<ToolReport>,
     /// The control-socket directory (§7.3). S1 only reports on it.
     pub socket_dir: SocketDirReport,
+    /// Measured execution containment. `None` unless `--containment` was asked
+    /// for: probing spawns real subprocesses, so it never happens by default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub containment: Option<ContainmentReport>,
+}
+
+/// What the capability probe measured on this host (§4.2).
+#[derive(Debug, Serialize)]
+pub struct ContainmentReport {
+    /// The OS identity that forms part of every cache key.
+    pub os_version: String,
+    /// One row per (adapter × launcher).
+    pub subjects: Vec<SubjectReport>,
+    /// How many measured subjects were written to the probe cache.
+    pub cached_subjects: usize,
+    /// Why caching did or did not happen.
+    pub cache_note: String,
+    /// Why there is no measurement at all, when the probe could not be set up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Store health.
@@ -120,8 +152,8 @@ pub fn build(args: &DoctorArgs) -> Report {
         None => Store::default_path(),
     };
 
-    let store = match store_path {
-        Ok(path) => inspect_store(&path, args.init_store),
+    let store = match &store_path {
+        Ok(path) => inspect_store(path, args.init_store),
         Err(err) => StoreReport {
             path: "<unknown>".to_string(),
             exists: false,
@@ -138,17 +170,126 @@ pub fn build(args: &DoctorArgs) -> Report {
         },
     };
 
+    let containment = args
+        .containment
+        .then(|| measure_containment(store_path.as_deref().ok()));
+
     let healthy = store.healthy;
     Report {
         ok: healthy,
         // §7.2: 2 is "no project / not initialized / store unhealthy". A missing
-        // adapter or missing git is not an error here.
+        // adapter or missing git is not an error here — and neither is an
+        // unmeasurable capability: that is what failing closed is for, and S7 is
+        // where it stops a launch.
         exit_code: if healthy { 0 } else { 2 },
         store,
         git: inspect_tool("git"),
         adapters: ADAPTERS.iter().map(|name| inspect_tool(name)).collect(),
         socket_dir: inspect_socket_dir(),
+        containment,
     }
+}
+
+/// Run the probe suite, then cache whatever was measured.
+///
+/// The probe is run before the store is touched, so a machine with no database
+/// still gets a measurement — it simply does not get a cached one.
+fn measure_containment(store_path: Option<&Path>) -> ContainmentReport {
+    let host = Host::detect();
+    let config = match probe::ProbeConfig::discover() {
+        Ok(config) => config,
+        Err(err) => {
+            return ContainmentReport {
+                os_version: host.os_version,
+                subjects: Vec::new(),
+                cached_subjects: 0,
+                cache_note: "nothing was measured, so nothing was cached".to_string(),
+                error: Some(err.to_string()),
+            };
+        }
+    };
+
+    let subjects = match probe::probe_all(&host, &config) {
+        Ok(subjects) => subjects,
+        Err(err) => {
+            return ContainmentReport {
+                os_version: host.os_version,
+                subjects: Vec::new(),
+                cached_subjects: 0,
+                cache_note: "nothing was measured, so nothing was cached".to_string(),
+                error: Some(err.to_string()),
+            };
+        }
+    };
+
+    let (cached_subjects, cache_note) = cache_subjects(store_path, &subjects);
+    ContainmentReport {
+        os_version: host.os_version,
+        subjects,
+        cached_subjects,
+        cache_note,
+        error: None,
+    }
+}
+
+/// Persist the measured subjects. Only measured ones: caching a fail-closed row
+/// would turn "we could not measure this" into a stored answer.
+fn cache_subjects(store_path: Option<&Path>, subjects: &[SubjectReport]) -> (usize, String) {
+    let Some(path) = store_path else {
+        return (
+            0,
+            "no store path could be determined, so nothing was cached".to_string(),
+        );
+    };
+    if !path.exists() {
+        return (
+            0,
+            format!(
+                "no store at {} — measured but not cached; `conductor doctor --init-store` \
+                 creates one",
+                path.display()
+            ),
+        );
+    }
+    let mut store = match Store::open_existing(path) {
+        Ok(store) => store,
+        Err(err) => {
+            return (
+                0,
+                format!("store could not be opened, nothing cached: {err}"),
+            );
+        }
+    };
+
+    let mut written = 0;
+    let mut failures = Vec::new();
+    for subject in subjects {
+        if subject.status != ProbeStatus::Measured {
+            continue;
+        }
+        let Some(key) = &subject.key else { continue };
+        match cache::upsert(store.conn_mut(), key, &subject.capabilities, now_ms()) {
+            Ok(()) => written += 1,
+            Err(err) => failures.push(format!("{} x {}: {err}", subject.adapter, subject.launcher)),
+        }
+    }
+
+    let note = if failures.is_empty() {
+        format!("cached {written} measured subject(s) in {}", path.display())
+    } else {
+        format!(
+            "cached {written} measured subject(s); failed: {}",
+            failures.join("; ")
+        )
+    };
+    (written, note)
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or_default()
 }
 
 fn inspect_store(path: &Path, init: bool) -> StoreReport {
@@ -440,10 +581,107 @@ pub fn render(report: &Report) -> String {
         }
     ));
 
+    if let Some(containment) = &report.containment {
+        out.push_str(&render_containment(containment));
+    }
+
     out.push_str(&format!(
         "\ndoctor: {}\n",
         if report.ok { "OK" } else { "NOT OK" }
     ));
+    out
+}
+
+/// Master plan §4.2's table, as measured on this host.
+fn render_containment(report: &ContainmentReport) -> String {
+    use conductor_core::containment::GatingDimension;
+
+    let mut out = String::from("\ncontainment (measured, never declared — §4.2)\n");
+    out.push_str(&format!("  host                {}\n", report.os_version));
+    if let Some(error) = &report.error {
+        out.push_str(&format!("  ERROR               {error}\n"));
+        return out;
+    }
+
+    let columns: Vec<String> = report
+        .subjects
+        .iter()
+        .map(|subject| format!("{} x {}", subject.adapter, subject.launcher))
+        .collect();
+    let width = columns
+        .iter()
+        .map(|column| column.len())
+        .max()
+        .unwrap_or(10)
+        .max(12);
+
+    out.push_str(&format!("  {:<22}", "dimension"));
+    for column in &columns {
+        out.push_str(&format!("  {column:<width$}"));
+    }
+    out.push('\n');
+
+    let cell = |subject: &SubjectReport, dimension: GatingDimension| match subject.status {
+        ProbeStatus::NotApplicable => "n/a".to_string(),
+        ProbeStatus::AdapterAbsent => "NONE (absent)".to_string(),
+        ProbeStatus::LauncherAbsent => "NONE (no launcher)".to_string(),
+        _ => {
+            let value = subject.capabilities.gating(dimension).to_string();
+            let measured = subject
+                .dimensions
+                .iter()
+                .find(|d| d.dimension == dimension)
+                .map(|d| d.measured)
+                .unwrap_or(false);
+            if measured {
+                value
+            } else {
+                format!("{value} (unmeasured)")
+            }
+        }
+    };
+
+    for dimension in GatingDimension::ALL {
+        out.push_str(&format!("  {:<22}", dimension.to_string()));
+        for subject in &report.subjects {
+            out.push_str(&format!("  {:<width$}", cell(subject, *dimension)));
+        }
+        out.push('\n');
+    }
+
+    // Kept in the table because it is worth knowing, and marked because §4.2
+    // forbids it from ever satisfying a requirement.
+    out.push_str(&format!("  {:<22}", "tool_interception"));
+    for subject in &report.subjects {
+        let value = match subject.status {
+            ProbeStatus::NotApplicable => "n/a".to_string(),
+            _ => format!("{} (informational)", subject.capabilities.tool_interception),
+        };
+        out.push_str(&format!("  {value:<width$}"));
+    }
+    out.push('\n');
+
+    for subject in &report.subjects {
+        if !subject.capabilities.exceptions.is_empty() {
+            out.push_str(&format!(
+                "  exceptions ({} x {})\n",
+                subject.adapter, subject.launcher
+            ));
+            for exception in &subject.capabilities.exceptions {
+                out.push_str(&format!("      {}\n", exception.display()));
+            }
+        }
+    }
+
+    for subject in &report.subjects {
+        for note in &subject.notes {
+            out.push_str(&format!(
+                "  note ({} x {}): {note}\n",
+                subject.adapter, subject.launcher
+            ));
+        }
+    }
+    out.push_str(&format!("  cache               {}\n", report.cache_note));
     out
 }
 
