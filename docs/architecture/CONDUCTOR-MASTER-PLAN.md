@@ -219,7 +219,7 @@ A trait earns existence when it has more than one real implementation, or I/O th
 | Candidate | Verdict |
 |---|---|
 | `AgentAdapter` | **Trait.** Three implementations (fake, codex, claude); the fake is load-bearing for the whole test suite. |
-| `WorkspaceProvider` | **Trait.** Tests need a fake; the isolation strategy may vary. |
+| `WorkspaceProvider` | **Concrete for now** — revised at S2. The stated justification ("tests need a fake") was falsified by building the tests: all 88 run real `git` against real disposable repositories, which is *strictly stronger* evidence for an isolation boundary than a fake could ever give — a faked clone cannot demonstrate that a real one does not share inodes. One implementation, no fake needed, so per CLAUDE.md a trait here would be a pure function in a costume. Promote when a second isolation strategy actually exists, or when a later slice needs to fake workspace I/O for speed — same rule as `Verifier`. |
 | `Store` | **Concrete.** One SQLite database, one transaction domain. Splitting into `RunStore`/`ApprovalStore`/`ArtifactStore` would invite a write spanning two "stores" and therefore two transactions — precisely the bug class §5 exists to prevent. |
 | `PolicyEvaluator` | **Function.** Pure, no I/O, one implementation. |
 | `Verifier` | **Function for now.** One implementation (spawn a command); tests use fixture commands. Promote only if a second execution strategy appears. |
@@ -400,9 +400,11 @@ git -C "$WORKSPACE" config commit.gpgsign false
 
 Residual shared `.git` state: **none.** Own config, refs, reflog, hooks path, object store, index.
 
-**Baseline captured at run creation:** `base_commit`, tree hash, `git status --porcelain=v2`, untracked list, `git config --list --local`, `git remote -v`, all refs, submodule status, stash count, hooks directory listing.
+**Baseline captured at run creation:** `base_commit`, tree hash, `git status --porcelain=v2`, untracked list, `git config --list --local`, `git remote -v`, all refs, submodule status, stash count, hooks directory listing, **nested-repository list** (the same paragraph below requires nested repos to be "detected at baseline", so the baseline must actually carry them — added at S2).
 
 **Workspace descriptor** — `.conductor-run.json` in every workspace, containing `run_id`, `task_id`, `base_commit`, `policy_hash`, `created_at`. This is what makes recovery possible with **no database at all**.
+
+**The descriptor must be hidden from git via `.git/info/exclude`**, not `.gitignore`. Found at S2 by a test: an agent running `git add -A` otherwise commits Conductor's own bookkeeping file onto the run branch — the branch Conductor later fetches into the user's real repository. A `.gitignore` would not do, because adding one is itself a tracked change appearing in the agent's diff.
 
 **Branch model:** `conductor/<task-id>/<run-id>`, from `base_commit`, existing only in the run clone until Conductor fetches it. Never pushed. Never auto-merged into the default branch.
 
@@ -775,7 +777,9 @@ On restart, an `INTENDED` row is resolved by **re-checking the precondition agai
 
 ## 4.8 Reconciliation
 
-`reconcile()` is a pure function of (baseline, observed, report?, verification?) returning exactly one verdict. **Every exit from `RUNNING` passes through it** — success, crash, timeout, cancel. This is the invariant that makes agent self-report non-authoritative.
+`reconcile()` is a pure function of (baseline, observed, report?, verification?, **scope**, **sensitive_patterns**) returning exactly one verdict. **Every exit from `RUNNING` passes through it** — success, crash, timeout, cancel. This is the invariant that makes agent self-report non-authoritative.
+
+*(The last two parameters were added at S2. The original four-argument signature could not produce `OUT_OF_SCOPE` at all: nothing in a baseline or an observation declares what the scope is — that lives on `task.scope_globs` (§5.1) and, for sensitive paths, in the policy snapshot (§4.4). A verdict the signature cannot compute is not a verdict.)*
 
 | Verdict | Meaning | Route |
 |---|---|---|
@@ -790,6 +794,17 @@ On restart, an `INTENDED` row is resolved by **re-checking the precondition agai
 **Reconciled surface** (after every attempt, before any state advances): `git status --porcelain=v2 --branch` · staged and unstaged diffs · untracked files · new commits and parents · **`git config --list --local` diffed** · **`git remote -v` diffed** · **all refs diffed** · reflog · stash list · dependency manifests · lockfiles · migration globs · files outside scope · secret-pattern scan over the whole diff · hooks directory · submodule state · **`/tmp` delta during the attempt window**.
 
 Any unexplained delta raises a `Finding`. **Findings never auto-resolve.**
+
+**Verdict precedence** (unspecified originally; fixed at S2 because row 14 forces it). Exactly one verdict is returned, highest wins:
+
+```
+CORRUPT  >  CONTRADICTED  >  POLICY_SENSITIVE  >  OUT_OF_SCOPE
+         >  CLEAN_COMPLETE / CLEAN_NO_REPORT   >  NO_CHANGE
+```
+
+`POLICY_SENSITIVE` must outrank `NO_CHANGE`: Part 9 row 14 sets a remote inside the clone, which leaves the *tree* identical to baseline while changing something that matters. A tree-first classifier would report `NO_CHANGE` and advance. `CORRUPT` outranks everything because a broken repository makes every other reading unreliable.
+
+**Nested-repository modification raises a finding but does not by itself set a verdict.** Nested repos are excluded from scope checks, so forcing `POLICY_SENSITIVE` would conflate "outside the declared scope" with "policy-relevant"; the finding alone still reaches a human, because findings never auto-resolve.
 
 ## 4.9 Security model — what is prevented, what is only detected
 
@@ -1385,7 +1400,16 @@ trigger 3. Two state-machine contradictions surfaced and were routed to S3 (see 
 
 ---
 
-### S2 — Workspace isolation
+### S2 — Workspace isolation  ✅ **COMPLETE 2026-08-12**
+
+**Outcome.** `conductor-git` crate: §4.1 clone sequence, descriptor, baseline, pure
+`reconcile()` with all seven verdicts, orphan quarantine, submodule refusal. 88 new
+tests (140 total). Isolation proven **and proven non-vacuous twice** — a negative
+control that asserts a default clone *is* damaged, and a mutation test removing
+`--no-hardlinks`, independently reproduced. ADR-0006 records that the plan's own
+prescribed recipe was vacuous in two ways. Report: `docs/reports/S2-completion-report.md`.
+**Deferred by design:** `/tmp` delta and secret scanning (S9), policy evaluation (S7) —
+left as documented seams, deliberately not stubbed.
 
 **Objective.** Create, describe, reconcile and quarantine per-run workspaces.
 **Why now.** The load-bearing safety mechanism; everything downstream assumes it.
@@ -1396,7 +1420,9 @@ trigger 3. Two state-machine contradictions surfaced and were routed to S3 (see 
 **Files.** `crates/conductor-git/src/{clone,baseline,reconcile,quarantine}.rs`, `tests/fixtures/`.
 **Tests.** Every verdict from a hand-constructed git state · submodule repo refused at registration · dirty source proceeds and stays untouched.
 **Failure injection.** Delete workspace mid-run · corrupt `.git` · leave `index.lock` · move the source repo.
-**Verify — the acceptance test that matters:** an adversarial script inside the clone that sets a remote, deletes a branch, writes a hook, runs `gc`, **and mutates object files in place** leaves the source repository byte-identical — asserted by hashing `.git/config`, `git show-ref` output, and `git cat-file --batch-all-objects --batch-check`. This test is known non-vacuous: the default (hardlinked) clone **fails** it (M2).
+**Verify — the acceptance test that matters:** an adversarial script inside the clone that sets a remote, deletes a branch, writes a hook, **mutates object files in place, runs `gc`, and mutates again**, leaves the source repository byte-identical — asserted by hashing `.git/config`, `git show-ref` output, and the **output** (never the exit status) of `git cat-file --batch-all-objects --batch-check`, plus `git fsck`. This test is known non-vacuous: the default (hardlinked) clone **fails** it (M2).
+
+**Two ways this recipe was vacuous as originally written, both measured at S2 (ADR-0006):** (a) mutating only *after* `gc` proves nothing, because `gc` unlinks the shared objects and unlink merely decrements a link count — the mutation must happen **before** `gc` while an inode is still shared; (b) `cat-file --batch-all-objects --batch-check` **exits 0 even on a corrupt object store**, printing `missing`, so an assertion on its exit status would be silently vacuous. Both non-vacuity guards — a negative control that asserts a default clone *is* damaged, and a mutation test that removes `--no-hardlinks` — are permanent parts of the suite.
 **Stop point.** Isolation proven.
 
 ---

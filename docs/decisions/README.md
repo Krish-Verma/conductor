@@ -51,3 +51,4 @@ copies of a number are two things that can disagree.
 | [ADR-0003](ADR-0003-claude-hook-reliability.md) | Claude Code `PreToolUse` hooks are audit-grade, not gate-grade | ACCEPTED |
 | [ADR-0004](ADR-0004-sqlite-claim-safety.md) | `BEGIN IMMEDIATE` single-statement claim is the run-claim mechanism | ACCEPTED |
 | [ADR-0005](ADR-0005-claim-latency-is-load-dependent.md) | The claim holds under `rusqlite`; its latency trigger was measuring offered load | ACCEPTED |
+| [ADR-0006](ADR-0006-the-isolation-test-recipe-was-vacuous.md) | The master plan's own hostile-workspace test recipe was vacuous in two ways | ACCEPTED |
