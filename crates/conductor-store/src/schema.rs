@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::error::{StoreError, StoreResult};
 
 /// The highest schema version this binary understands.
-pub const SUPPORTED_SCHEMA_VERSION: i64 = 4;
+pub const SUPPORTED_SCHEMA_VERSION: i64 = 5;
 
 /// Pragmas as they are *set*, in application order.
 ///
@@ -334,4 +334,56 @@ ALTER TABLE artifact RENAME COLUMN sha256 TO content_hash;
 /// than integrated into a branch nobody chose.
 pub const SCHEMA_V4: &str = r#"
 ALTER TABLE run ADD COLUMN target_branch TEXT;
+"#;
+
+/// Schema v5 — what repair observed about each attempt that did not succeed.
+///
+/// §4.6's three loop-breakers are decided from the history of a run's attempts,
+/// and §4.6's acceptance property is that "no configuration of the fake agent
+/// can produce more than `max_attempts` agent invocations". A history held in
+/// memory cannot deliver either: §4.7's whole premise is that Conductor is
+/// killed and restarted, and a bound that resets on restart is not a bound —
+/// crash-restart cycles would produce unbounded agent invocations while every
+/// in-memory counter read zero.
+///
+/// # The inputs are the truth; `fingerprint` is a convenience
+///
+/// `failing_checks`, `assertion` and `tree_hash` are the **inputs** to §4.6's
+/// definition. `fingerprint` is the derived digest, stored so that a human
+/// reading the table — or a repair packet quoting it — does not have to run
+/// Conductor to see which failure recurred.
+///
+/// **Nothing reads `fingerprint` back to make a decision.** Loading rebuilds the
+/// `Failure` from the three inputs and recomputes the digest, so a stored
+/// digest that disagreed with its own inputs (a normalizer change, a partial
+/// write, a hand edit) can never steer a loop-breaker. A denormalized column
+/// that decisions depend on is a second source of truth; one that only humans
+/// read is a comment with an index.
+///
+/// # Why the primary key is the attempt
+///
+/// One attempt produces at most one observation, and `attempt` rows are written
+/// **before** the agent is spawned (two committed transactions ahead of it), so
+/// keying on the attempt makes the observation's identity as durable as the
+/// invocation it describes. `UNIQUE(run_id, ordinal)` restates
+/// `attempt`'s own uniqueness so that the ordering this table is read in —
+/// oldest attempt first — cannot contain two rows claiming the same position.
+///
+/// `kind` is `FAILED` | `NO_CHANGE` | `CRASHED` | `INFRASTRUCTURE`; the last is
+/// the §4.7 distinction that must never be conflated with the first three,
+/// "because conflating them is how a broken API key silently exhausts a task's
+/// budget".
+pub const SCHEMA_V5: &str = r#"
+CREATE TABLE repair_observation (
+  attempt_id     TEXT PRIMARY KEY REFERENCES attempt(id),
+  run_id         TEXT NOT NULL REFERENCES run(id),
+  ordinal        INTEGER NOT NULL,
+  kind           TEXT NOT NULL,       -- FAILED|NO_CHANGE|CRASHED|INFRASTRUCTURE
+  failing_checks TEXT NOT NULL,       -- json array, sorted
+  assertion      TEXT NOT NULL,
+  tree_hash      TEXT NOT NULL,
+  fingerprint    TEXT NOT NULL,       -- derived; never read back to decide
+  recorded_at    INTEGER NOT NULL,
+  UNIQUE(run_id, ordinal)
+);
 "#;

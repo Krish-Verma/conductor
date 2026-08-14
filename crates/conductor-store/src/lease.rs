@@ -278,14 +278,58 @@ pub fn route_verified(
     advance_from(conn, fence, RunState::Verifying, route, detail, now_ms)
 }
 
-/// Move a run out of `required` into the route's state, checking §5.2's table.
+/// Re-open a `REPAIRING` run for another agent attempt — §4.6's repair edge.
 ///
-/// Two guards, and they catch different mistakes. The `state = ?` clause catches
-/// a caller that skipped a state entirely — `RECONCILING` is "mandatory and
-/// unskippable". The legality check catches a caller that is in the right state
-/// and asked for a destination the machine does not draw; without it,
-/// `route_reconciled` would happily write `COMPLETE` given a token, and §5.2
-/// puts `COMPLETE` downstream of `VERIFYING`.
+/// **`REPAIRING → READY`, not `REPAIRING → RECONCILING`.** §5.2's diagram draws
+/// the latter and it cannot work: §4.6's repair *is* an agent invocation, and
+/// §5.2's only route to one is `READY ──claim+eligibility──► RUNNING`; §4.7's
+/// claim additionally preserves `RECONCILING` instead of setting `RUNNING`, so a
+/// run pushed to `RECONCILING` would be re-reconciled with no agent ever
+/// running. `conductor-core`'s legality table already records `READY` as the
+/// edge S6 owns; this is the run-row half of it.
+///
+/// It goes through [`advance_state`] — the same statement, the same fence check,
+/// the same §5.2 legality check — precisely so that S6 does not acquire a
+/// private way to write `run.state`. A second, weaker path to the column is how
+/// the guarantees the first one enforces stop being guarantees.
+pub fn reopen_for_repair(
+    conn: &mut Connection,
+    fence: &Fence,
+    detail: &str,
+    now_ms: i64,
+) -> StoreResult<RunState> {
+    advance_state(
+        conn,
+        fence,
+        RunState::Repairing,
+        RunState::Ready,
+        detail,
+        now_ms,
+    )
+}
+
+/// Hand a `REPAIRING` run to a person — §4.6's `escalate_after`.
+///
+/// The other exit from `REPAIRING`, and the one every bound in §4.6 eventually
+/// takes: a loop-breaker fired, the budget ran out, or the invocation ceiling
+/// was reached. Same statement and same checks as [`reopen_for_repair`].
+pub fn escalate_from_repairing(
+    conn: &mut Connection,
+    fence: &Fence,
+    detail: &str,
+    now_ms: i64,
+) -> StoreResult<RunState> {
+    advance_state(
+        conn,
+        fence,
+        RunState::Repairing,
+        RunState::AwaitingReview,
+        detail,
+        now_ms,
+    )
+}
+
+/// Move a run out of `required` into the route's state, checking §5.2's table.
 fn advance_from(
     conn: &mut Connection,
     fence: &Fence,
@@ -294,7 +338,25 @@ fn advance_from(
     detail: &str,
     now_ms: i64,
 ) -> StoreResult<RunState> {
-    let next = route.state();
+    advance_state(conn, fence, required, route.state(), detail, now_ms)
+}
+
+/// Move a run from `required` to `next`, checking §5.2's table.
+///
+/// Two guards, and they catch different mistakes. The `state = ?` clause catches
+/// a caller that skipped a state entirely — `RECONCILING` is "mandatory and
+/// unskippable". The legality check catches a caller that is in the right state
+/// and asked for a destination the machine does not draw; without it,
+/// `route_reconciled` would happily write `COMPLETE` given a token, and §5.2
+/// puts `COMPLETE` downstream of `VERIFYING`.
+fn advance_state(
+    conn: &mut Connection,
+    fence: &Fence,
+    required: RunState,
+    next: RunState,
+    detail: &str,
+    now_ms: i64,
+) -> StoreResult<RunState> {
     required
         .as_task_state()
         .transition_to(next.as_task_state())
@@ -320,7 +382,7 @@ fn advance_from(
         let payload = format!(
             "{{\"to\":\"{}\",\"route\":\"{}\",\"detail\":{}}}",
             next.as_str(),
-            route.state(),
+            next.as_str(),
             serde_json::to_string(detail)?
         );
         append_event(

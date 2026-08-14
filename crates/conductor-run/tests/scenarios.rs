@@ -75,6 +75,7 @@ fn harness(root: &Path, scope: &[&str], supervisor: SupervisorConfig) -> WorkerC
         scope: Scope::new(scope.iter().map(|s| s.to_string())),
         sensitive: SensitivePatterns::default(),
         agent_env_extra: Default::default(),
+        agent_session_id: None,
     }
 }
 

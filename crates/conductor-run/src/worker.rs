@@ -163,6 +163,14 @@ pub struct WorkerConfig {
     /// explicitly by name. It is still a build, not a filter — nothing arrives
     /// here by inheritance.
     pub agent_env_extra: std::collections::BTreeMap<String, String>,
+    /// The agent session this attempt resumes, when §4.6 says resume.
+    ///
+    /// `None` is the ordinary case and covers all three of
+    /// [`crate::repair::config::session_id_for`]'s ways to get nothing. It is
+    /// also what makes `new_session_on_attempt: 2` observable from here: the
+    /// worker does not decide, it is told, and a `None` on attempt 2 is repair
+    /// having deliberately discarded a session that exists.
+    pub agent_session_id: Option<String>,
 }
 
 /// What running one attempt produced.
@@ -261,7 +269,7 @@ pub fn run_one_attempt(
             adapter: adapter.id().to_string(),
             launcher: "none".to_string(),
             caps_snapshot: "{}".to_string(),
-            agent_session_id: None,
+            agent_session_id: config.agent_session_id.clone(),
         },
         now_ms(),
     )?;
@@ -279,7 +287,7 @@ pub fn run_one_attempt(
         attempt_ordinal: ordinal,
         workspace: workspace_path.clone(),
         report_path: report_path.clone(),
-        session_id: None,
+        session_id: config.agent_session_id.clone(),
         env: {
             let mut env = agent_environment(&workspace_path);
             env.extend(config.agent_env_extra.clone());

@@ -9,6 +9,7 @@ pub mod claim;
 pub mod error;
 pub mod lease;
 pub mod migrate;
+pub mod repair;
 pub mod run;
 pub mod schema;
 pub mod side_effect;
@@ -29,6 +30,7 @@ pub use claim::{ClaimedRun, claim_next_run, claim_run};
 pub use error::{StoreError, StoreResult};
 pub use lease::{ExpiredLease, HEARTBEAT_MS, LEASE_MS};
 pub use migrate::{MigrationStep, migrate};
+pub use repair::{NewRepairObservation, RepairObservationRow};
 pub use run::{FindingRow, RunRow};
 pub use schema::PragmaReport;
 pub use side_effect::SideEffectRow;
@@ -273,6 +275,47 @@ impl Store {
         now_ms: i64,
     ) -> StoreResult<RunState> {
         lease::route_verified(&mut self.conn, fence, route, detail, now_ms)
+    }
+
+    /// `REPAIRING → READY` — §4.6's repair edge, so the next attempt can be
+    /// claimed. Fenced, and checked against §5.2's table like every other move.
+    pub fn reopen_for_repair(
+        &mut self,
+        fence: &Fence,
+        detail: &str,
+        now_ms: i64,
+    ) -> StoreResult<RunState> {
+        lease::reopen_for_repair(&mut self.conn, fence, detail, now_ms)
+    }
+
+    /// `REPAIRING → AWAITING_REVIEW` — §4.6's escalation. Fenced.
+    pub fn escalate_from_repairing(
+        &mut self,
+        fence: &Fence,
+        detail: &str,
+        now_ms: i64,
+    ) -> StoreResult<RunState> {
+        lease::escalate_from_repairing(&mut self.conn, fence, detail, now_ms)
+    }
+
+    // ---- repair observations (§4.6, schema v5) ---------------------------
+
+    /// Record what repair observed about one attempt. Fenced.
+    pub fn record_repair_observation(
+        &mut self,
+        fence: &Fence,
+        observation: &NewRepairObservation,
+        now_ms: i64,
+    ) -> StoreResult<()> {
+        repair::record_observation(&mut self.conn, fence, observation, now_ms)
+    }
+
+    /// Every repair observation of one run, oldest attempt first.
+    pub fn repair_observations_for_run(
+        &self,
+        run_id: &RunId,
+    ) -> StoreResult<Vec<RepairObservationRow>> {
+        repair::observations_for_run(&self.conn, run_id)
     }
 
     /// Append one evidence row. Fenced.

@@ -672,6 +672,20 @@ Consequences: free caching (re-verifying an unchanged tree is a lookup, which ma
 
 `INCONCLUSIVE` covers timeout, infrastructure error and flaky-retry disagreement. It is **not** a failure, because the distinction determines what happens next: `FAIL` → repair; `INCONCLUSIVE` → bounded infra retry, then human. Collapsing them is how a broken cache turns into three wasted agent attempts.
 
+> **S5 implemented the second half of that sentence as unreachable; corrected at
+> S6.** S5's `finish` routed any refusal *without* a `FAIL` straight to
+> `AWAITING_REVIEW`, so an `INCONCLUSIVE` check went to a person with no retry at
+> all and acceptance row 8's "infra retry ×1, **no budget spent**" could never
+> happen. No test pinned the old behaviour, which is why it survived S5's suite.
+>
+> §5.2 gives `VERIFYING` exactly one non-human successor, so the bounded retry has
+> to leave through `REPAIRING`. What makes that safe is that the bound is real:
+> `decide()` counts infrastructure attempts against `max_infra_retries` and hands
+> the run to a person after them, **without** touching the work budget §4.7
+> protects. The routing predicate is now `retry_kind(report)` — `Work |
+> Infrastructure → REPAIRING`, `None → AWAITING_REVIEW` — so the one place that
+> classifies a report is the one place that routes it.
+
 **Logs** go to `artifacts/<run>/verification/<check>-<attempt>.log`, **content hash (BLAKE3) recorded** (ADR-0007), never inlined into packets, **secret-scanned before any excerpt enters a packet.**
 
 The log name is qualified in practice (`.retryN`, `.<tree12>`): §4.5 itself requires re-running a `VOID` check at the new tree, which is the *same* check and attempt at a *different* tree, so `<check>-<attempt>` alone is not unique. Logs are opened with `create_new`, so a surprise collision is an outcome rather than a silent overwrite.
@@ -710,9 +724,25 @@ fingerprint(failure) = blake3(
 )
 
 progressed(prev, next) :=
-      next.failing_checks ⊂ prev.failing_checks              # strictly fewer
-   OR (next.fingerprint ≠ prev.fingerprint AND tree changed) # different problem, real edit
+      NOT (prev.failing_checks ⊂ next.failing_checks)        # not a pure regression  ← S6
+  AND (   next.failing_checks ⊂ prev.failing_checks          # strictly fewer
+       OR (next.fingerprint ≠ prev.fingerprint AND tree changed) ) # different problem, real edit
 ```
+
+> **AMENDED at S6 (ADR-0008). The leading clause is new; the two disjuncts are
+> unchanged.** As originally written the predicate called a pure regression
+> progress. The failing-check set is hashed into the fingerprint, so `{alpha} →
+> {alpha, beta}` has a different fingerprint, and an agent that edits files
+> changes the tree — both halves of the second disjunct hold. Everything that
+> failed before still fails, one more fails now, and the loop was told to keep
+> spending. `progressed()` is consulted directly by the loop-breaker (it is the
+> only stop that fires when `stop_on_identical_fingerprint` is off), so this
+> removed a stopping condition, in the silent direction §4.6's own normalizer
+> doctrine names as the dangerous one.
+>
+> `⊂` is **proper** containment in both directions. The guard refuses only
+> unambiguous regression: `{alpha} → {beta}` — alpha fixed, beta revealed — is not
+> a superset and remains progress, which is the ordinary shape of real repair.
 
 ```yaml
 repair:
@@ -720,7 +750,15 @@ repair:
   stop_on_identical_fingerprint: true
   escalate_after: 2                  # → AWAITING_REVIEW
   new_session_on_attempt: 2          # fresh context; the stuck one is stuck
+  max_infra_retries: 1               # ← S6; row 8's "infra retry ×1"
 ```
+
+> **`max_infra_retries` added at S6.** §4.7 bounds infrastructure retries in prose
+> ("backoff, does **not** consume budget") without giving a number, and acceptance
+> row 8 supplies one ("infra retry ×1"). A bound with no configured value is a
+> bound somebody hardcodes at a call site. It also has to exist for the ceiling
+> below to be finite: infrastructure attempts cost no *work* budget, so without a
+> term of their own they are unbounded in the only count that matters — spawns.
 
 **Three loop-breakers, because loops have three causes:**
 1. **Identical fingerprint twice** → stop immediately; do not spend attempt 2.
@@ -729,7 +767,31 @@ repair:
 
 `new_session_on_attempt: 2` is deliberate: a stuck agent's context *is* the problem, and resuming re-imports the stuckness. The repair packet's `do_not_retry` list carries forward what matters.
 
-**Acceptance property:** no configuration of the fake agent can produce more than `max_attempts` agent invocations. Asserted by counting spawns.
+**Acceptance property:** no configuration of the fake agent can produce more than
+
+```
+ceiling = 1 + max_attempts + max_infra_retries      # defaults: 1 + 2 + 1 = 4
+```
+
+agent invocations. Asserted by counting spawns.
+
+> **AMENDED at S6 (ADR-0009), in two ways.**
+>
+> **(1) The number was wrong.** `max_attempts` counts *repairs*, so the initial
+> attempt was never inside it, and §4.7 exempts infrastructure retries from the
+> budget entirely. Taken literally the property was unsatisfiable by its own
+> definitions. The ceiling above is a function of **configuration only** and never
+> of agent behaviour, which is what the property was reaching for.
+>
+> **(2) The bound must be durable, or it is not a bound.** §4.6 as written implies
+> an in-memory count. Acceptance rows 10 and 11 restart runs, and a count held in
+> a process resets when that process dies — so crash-restart cycles produce
+> unbounded invocations while every loop-breaker still reads as correct. The
+> ceiling is therefore enforced from durable state (`attempt` rows, which §4.7's
+> supervisor commits **before** `spawn()`) immediately before every spawn, in
+> addition to — never instead of — the three loop-breakers. The breakers stop the
+> loop early and say why; the ceiling is the backstop that holds when the history
+> they read has been lost.
 
 ## 4.7 Durable runtime semantics
 
@@ -1630,7 +1692,36 @@ clean exit.
 
 ---
 
-### S6 — Bounded repair
+### S6 — Bounded repair  ✅ **DONE**
+
+**Outcome.** Loops are provably bounded, and the bound survives losing the state it
+reasons from. `ceiling = 1 + max_attempts + max_infra_retries` (default 4) enforced from
+durable `attempt` rows before every spawn, plus §4.6's three loop-breakers for the early,
+informative stops. Schema v5 adds `repair_observation` so `RepairHistory` is rebuilt from
+the database each pass rather than carried in a process. 58 new tests (**594 total**).
+Four master-plan corrections (ADR-0008, ADR-0009, §4.5's unreachable infra retry, row 9's
+off-by-one). Report: `docs/reports/S6-completion-report.md`.
+
+**The slice's own predicate called a regression progress (ADR-0008).** Because the
+failing-check set is hashed into the fingerprint, `{alpha} → {alpha, beta}` satisfied
+"different fingerprint AND tree changed" — nothing fixed, something newly broken, and the
+loop told to keep spending. It mattered because `decide()` consults `progressed()`
+directly and it is the *only* stop that fires when `stop_on_identical_fingerprint` is off.
+
+**The bigger correction is that the bound was not durable (ADR-0009).** §4.6 implies an
+in-memory count, but rows 10 and 11 restart runs by design, and the supervisor commits the
+`attempt` row *before* `spawn()` while the verification result lands *after*. A kill in
+that window leaves an invocation on the record and no memory of what it produced, so
+`decide()` says `Repair` forever. Every loop-breaker was individually correct and the
+system could still spend without limit — the same shape of error as S2's vacuous isolation
+test and S5's row 22.
+
+**Verified by mutation, reproduced independently of the implementing agent.** Ceiling
+disabled → the loop reached ordinal 12 against a ceiling of 4. Breaker 1 disabled → 2
+tests fail. The durable write made a no-op → 7 tests fail. **Stated honestly:** because
+`ceiling ≥ decide()`'s bound in-process by construction, the ceiling's non-vacuity rests
+on exactly one test — the crash-window one. That is by design, not oversight, but it means
+deleting that test would silently untest the backstop.
 
 **Objective.** Failed verification → bounded repair with real loop detection.
 **Dependencies.** S4, S5.
@@ -1777,7 +1868,7 @@ Every row is a test. "Retry?" = an automatic agent attempt. "Human?" = execution
 | 6 | False success | "complete", tree unchanged | `CONTRADICTED` | halt | no | **yes** | `AWAITING_REVIEW` |
 | 7 | Verification failure | test fails | `FAIL` | repair packet | yes ≤2 | if unfixed | `COMPLETE` / review |
 | 8 | Verification timeout | hang > timeout | `INCONCLUSIVE` | infra retry ×1, **no budget spent** | infra only | after 2 | `AWAITING_REVIEW` |
-| 9 | Repeated identical failure | same fingerprint | attempt 2 **not started** | stop at once | no | **yes** | `AWAITING_REVIEW` |
+| 9 | Repeated identical failure | same fingerprint | the **next** attempt not started — *see note* | stop at once | no | **yes** | `AWAITING_REVIEW` |
 | 10 | Daemon crash mid-run | kill Conductor | lease expires | adopt or reconcile on restart | no | no | resumes |
 | 11 | Reboot with live workspaces | reboot | leases expired, workspaces on disk | scan descriptors, reconcile each | no | no | resumes |
 | 12 | Crash during approval wait | kill in `AWAITING_APPROVAL` | request `REQUESTED` | wait restored, TTL preserved | no | yes (as before) | resumes on grant |
@@ -1801,6 +1892,14 @@ Every row is a test. "Retry?" = an automatic agent attempt. "Human?" = execution
 | 30 | **Ineligible execution mode** | sensitive task, caps below requirement | attempt never starts | refuse with dimension named | no | **yes** | `BLOCKED` |
 
 Rows 14, 15, 22, 24, 26, 27, 28, 29, 30 are the ones that most distinguish this design.
+
+**Note on row 9 — "attempt 2 not started" was off by one (found at S6).**
+A fingerprint cannot be *identical* until it has been produced twice, so the earliest
+point breaker 1 can fire is after the second attempt has already run. The invocation it
+prevents is therefore the **third** — the second repair — not "attempt 2". The row's
+intent (stop the moment repetition is provable, without spending another agent) is
+implemented exactly; only its arithmetic was wrong. Row 9's fixture stops at 2
+invocations against a ceiling of 4, counted three independent ways.
 
 **Note on row 22 — its counting assertion is necessary but not sufficient (found at S5).**
 "Assert exactly one commit and one ref update" cannot fail for either git effect under a

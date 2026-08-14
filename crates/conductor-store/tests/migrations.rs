@@ -71,6 +71,9 @@ fn schema_v1_contains_exactly_the_tables_and_indexes_of_part_5_1() {
         "plan_version",
         "policy_snapshot",
         "project",
+        // Schema v5 (S6). The assertion stays exhaustive on purpose: a
+        // migration that adds a table must be seen here, not absorbed.
+        "repair_observation",
         "run",
         "schema_version",
         "side_effect",

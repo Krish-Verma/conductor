@@ -15,6 +15,7 @@ pub mod effects;
 pub mod lease;
 pub mod paths;
 pub mod recovery;
+pub mod repair;
 pub mod spec;
 pub mod supervise;
 pub mod verify;
@@ -28,9 +29,15 @@ pub use effects::{
 pub use lease::{HeartbeatOutcome, heartbeat};
 pub use paths::{ArtifactRoot, OwnedDir, Owner, OwnershipError, Provenance};
 pub use recovery::{RecoveryConfig, RecoveryDecision, RecoveryReport, recover};
+pub use repair::driver::{
+    EscalationReason, RepairError, RepairOutcome, Step, ceiling, drive, repair_once,
+};
 pub use supervise::{
     ChildAlive, Heartbeat, Liveness, SpawnedAgent, Supervised, SupervisionEnd, SupervisorConfig,
     probe, spawn, start_time_us,
 };
-pub use vertical::{Resumed, Vertical, VerticalConfig, VerticalOutcome, resume_task, run_task};
+pub use vertical::{
+    Resumed, Vertical, VerticalConfig, VerticalOutcome, resume_task, run_task,
+    run_task_with_session,
+};
 pub use worker::{AttemptOutcomeRecord, WorkerConfig, WorkerError, run_one_attempt};

@@ -165,10 +165,36 @@ struct Finished {
 }
 
 /// Drive one task from `PENDING` to a terminal-or-waiting state.
+///
+/// A fresh session every time. §4.6's session policy belongs to repair, which
+/// knows the attempt ordinal and the configuration; a caller with neither has
+/// nothing to resume.
 pub fn run_task(
     store: &mut Store,
     adapter: &dyn AgentAdapter,
     config: &VerticalConfig,
+    observer: &mut dyn VerticalObserver,
+) -> Result<Vertical, WorkerError> {
+    run_task_with_session(store, adapter, config, None, observer)
+}
+
+/// The same, with §4.6's session decision already made.
+///
+/// `session` is the id the adapter should resume, and `None` covers all three of
+/// [`crate::repair::config::session_id_for`]'s ways to get nothing: the policy is
+/// `Fresh`, the adapter cannot resume, or there is no previous session. The
+/// distinction between them is repair's to make and to record; by the time it
+/// reaches here it is one `Option`.
+///
+/// A separate entry point rather than a field on [`VerticalConfig`]: the session
+/// is a property of *this attempt*, not of the task's configuration, and putting
+/// per-attempt state on a config that callers build once and reuse is how a
+/// second attempt quietly resumes the first one's context.
+pub fn run_task_with_session(
+    store: &mut Store,
+    adapter: &dyn AgentAdapter,
+    config: &VerticalConfig,
+    session: Option<&str>,
     observer: &mut dyn VerticalObserver,
 ) -> Result<Vertical, WorkerError> {
     let task = store
@@ -215,6 +241,7 @@ pub fn run_task(
         scope,
         sensitive: config.sensitive.clone(),
         agent_env_extra: config.agent_env_extra.clone(),
+        agent_session_id: session.map(str::to_string),
     };
     let attempt = run_one_attempt(
         store,
@@ -478,14 +505,23 @@ fn finish(
             // bounded infra retry, then human". S6 owns the repair loop; the
             // routing decision is made here so S6 inherits it rather than
             // inventing it.
-            let route = if report
-                .results
-                .iter()
-                .any(|r| r.outcome == conductor_core::VerificationOutcome::Fail)
-            {
-                ReconciledRoute::Repairing
-            } else {
-                ReconciledRoute::AwaitingReview
+            //
+            // **Corrected at S6.** S5 routed anything without a `FAIL` straight
+            // to `AWAITING_REVIEW`, which made the *first* half of §4.5's
+            // sentence unreachable: an `INCONCLUSIVE` check went to a person
+            // with no retry at all, and acceptance row 8's "infra retry ×1, **no
+            // budget spent**" could not happen. §5.2 gives `VERIFYING` exactly
+            // one non-human successor, so the bounded retry has to leave through
+            // `REPAIRING` — and what makes that safe is that the bound is real:
+            // `repair::breaker::decide` counts infrastructure attempts against
+            // `max_infra_retries` and hands the run to a person after them,
+            // without touching the work budget §4.7 protects.
+            let route = match crate::repair::config::retry_kind(&report) {
+                crate::repair::config::RetryKind::Work
+                | crate::repair::config::RetryKind::Infrastructure => ReconciledRoute::Repairing,
+                // Every check passed and the gate still refused: that is a
+                // criterion no further agent attempt can satisfy.
+                crate::repair::config::RetryKind::None => ReconciledRoute::AwaitingReview,
             };
             let reason = refusals
                 .iter()
