@@ -743,7 +743,11 @@ fn report_findings(
 /// classes or brace expansion, and a matcher whose semantics live in this file
 /// is a matcher whose over-matching can be reviewed — over-matching being the
 /// dangerous direction, since it would silently widen a task's scope.
-fn glob_match(pattern: &str, path: &str) -> bool {
+///
+/// Public since S7: policy migration globs and `architecture.change` proxy globs
+/// (§4.4) are the same notion of "does this path match", and a second matcher
+/// would be a second set of over-matching semantics to review.
+pub fn glob_match(pattern: &str, path: &str) -> bool {
     let pattern: Vec<&str> = pattern.split('/').collect();
     let path: Vec<&str> = path.trim_end_matches('/').split('/').collect();
     match_segments(&pattern, &path)

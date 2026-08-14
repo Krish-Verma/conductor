@@ -635,6 +635,32 @@ fn changed_paths(workspace: &Path) -> Vec<String> {
     }
 }
 
+/// The global and project policy documents that exist, resolved into one policy.
+///
+/// A file that is absent is not an error — an operator with no global policy has
+/// no global policy. A file that is present and malformed *is* one, because
+/// carrying on would run the task under a policy nobody wrote.
+fn resolve_policy(repo: &Path) -> Result<conductor_run::policy::model::ResolvedPolicy, String> {
+    use conductor_run::policy::load;
+    use conductor_run::policy::model::Origin;
+
+    let read = |path: Option<PathBuf>, origin: Origin| -> Result<_, String> {
+        match path {
+            Some(path) if path.exists() => load::load_document(&path, origin)
+                .map(Some)
+                .map_err(|e| e.to_string()),
+            _ => Ok(None),
+        }
+    };
+
+    load::resolve_documents(
+        read(load::global_policy_path(), Origin::Global)?,
+        read(Some(repo.join(load::PROJECT_POLICY_PATH)), Origin::Project)?,
+        None,
+    )
+    .map_err(|e| e.to_string())
+}
+
 /// Create the task and run rows the vertical needs, if they are not there.
 fn ensure_task_and_run(
     store: &mut Store,
@@ -650,8 +676,21 @@ fn ensure_task_and_run(
         ))
     );
     let plan_version_id = format!("pv-{}", short(spec_hash));
-    let policy_blob = "{}";
-    let policy_hash = conductor_core::effect::content_hash(policy_blob.as_bytes());
+
+    // §4.4: "At run creation Conductor canonically serializes the resolved
+    // policy … and pins `policy_hash` on the run." Resolved from the global and
+    // project files as they stand *now*; from here on the run is judged by this
+    // snapshot and not by the files, which is what makes editing
+    // `.conductor/policy.yaml` mid-run unable to change a running decision.
+    //
+    // A malformed policy file stops the run here rather than being ignored.
+    // That is the fail-closed direction: a run under a policy Conductor could
+    // not read is a run under no policy.
+    let policy = resolve_policy(repo)?;
+    let snapshot = conductor_run::policy::load::snapshot(&policy);
+    let policy_hash = snapshot.hash.clone();
+    conductor_run::policy::load::persist(store.conn_mut(), &snapshot, now)
+        .map_err(|e| e.to_string())?;
 
     conductor_store::with_immediate(store.conn_mut(), |tx| {
         tx.execute(
@@ -680,11 +719,6 @@ fn ensure_task_and_run(
                 spec_hash,
                 conductor_run::spec::DEFAULT_SPEC_PATH
             ],
-        )?;
-        tx.execute(
-            "INSERT OR IGNORE INTO policy_snapshot (hash, canonical_blob, created_at)
-             VALUES (?1, ?2, ?3)",
-            rusqlite::params![policy_hash, policy_blob, now],
         )?;
         Ok(())
     })

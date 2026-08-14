@@ -30,6 +30,6 @@ pub use integrate::{
 pub use quarantine::{Orphan, OrphanReason, Quarantined, find_orphans, quarantine};
 pub use reconcile::{
     AgentReport, Finding, FindingKind, Reconciliation, ReportClaim, Scope, SensitivePatterns,
-    Verdict, VerificationOutcome, reconcile,
+    Verdict, VerificationOutcome, glob_match, reconcile,
 };
 pub use tree::{TreeHash, TreeHasher};

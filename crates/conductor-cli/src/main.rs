@@ -1,10 +1,12 @@
 //! The `conductor` binary.
 //!
 //! S1 shipped one command: `doctor`. S5 adds `task run|show|list` — §7.1's core
-//! verb and the two commands that read what it did. The rest of §7.1's thirteen
-//! arrive with the slices that implement them.
+//! verb and the two commands that read what it did. S7 adds `policy explain`,
+//! §7.1's "why was this denied — the 2 a.m. command". The rest of §7.1's
+//! thirteen arrive with the slices that implement them.
 
 mod doctor;
+mod policy;
 mod task;
 
 use std::process::ExitCode;
@@ -41,9 +43,11 @@ mod exit {
     /// Internal error (`EX_SOFTWARE`).
     pub const INTERNAL: u8 = 70;
 
-    // `4 policy denied` is deliberately absent: S7 owns policy, and a constant
-    // nothing can return is a code that reads as coverage without being it —
-    // the same objection S3 made to the `RECOVERING` run state.
+    // `4 policy denied` is still deliberately absent after S7. S7 *decides*;
+    // nothing in it enforces, and `policy explain` succeeds when it explains a
+    // deny — returning 4 there would break `set -e` scripts using the command
+    // for exactly its stated purpose. S9 owns enforcement and is the slice that
+    // can return this code without it being a constant nothing produces.
 }
 
 #[derive(Debug, Parser)]
@@ -69,6 +73,13 @@ enum Commands {
         #[command(flatten)]
         shared: task::StoreArgs,
     },
+    /// Explain a policy decision.
+    Policy {
+        #[command(subcommand)]
+        command: policy::PolicyCommand,
+        #[command(flatten)]
+        shared: task::StoreArgs,
+    },
 }
 
 fn main() -> ExitCode {
@@ -87,6 +98,7 @@ fn main() -> ExitCode {
     match cli.command {
         Commands::Doctor(args) => run_doctor(&args),
         Commands::Task { command, shared } => task::run(&command, &shared),
+        Commands::Policy { command, shared } => policy::run(&command, &shared),
     }
 }
 

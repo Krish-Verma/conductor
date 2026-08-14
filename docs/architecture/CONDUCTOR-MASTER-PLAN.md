@@ -594,6 +594,7 @@ Stage 1 — CEILING (locked policy)
     Locked global rules produce a maximum permissiveness.
     Nothing below can exceed it — not project rules, not exceptions,
     not a human grant. Unlocking is a separate, audited operation.
+    ← S6/S7: the ceiling's load-bearing work is on EXCEPTIONS and GRANTS.
 
 Stage 2 — JOIN
     effect = max(builtin_invariant, global_default, project_rule, task_constraint)
@@ -603,6 +604,23 @@ Stage 2 — JOIN
 ```
 
 **Invariants:** a project can always tighten, never loosen past the ceiling · an exception can only lower an effect within the ceiling · **unknown action → `deny`** (fail closed; the taxonomy will be incomplete on day one and incompleteness must not read as permission) · built-in invariants are not configurable at all (never write outside the run workspace; never print a value matching a secret detector; never push to a remote; never operate on an unregistered repository).
+
+> **CLARIFIED at S7 — "a project can always tighten, never loosen past the
+> ceiling" is true but *vacuous as stated*.** Stage 2's join is `max`, so a
+> project rule is structurally incapable of loosening anything: the ceiling is
+> never what stops it. The construct that *lowers* an effect is the **exception**
+> (and, from S8, a human grant), and bounding those is the ceiling's only
+> load-bearing role. Stated plainly because a test written against the sentence as
+> written would assert something that cannot fail — the exact vacuity S2, S5 and
+> S6 each produced. S7's ceiling test therefore exercises the **exception** path,
+> with an unlocked-rule positive control proving the lock is what stopped it.
+>
+> **Two of the four built-in invariants are not action-keyed.** "Never write
+> outside the run workspace" and "never push to a remote" map onto typed actions;
+> "never operate on an unregistered repository" and "never print a value matching
+> a secret detector" are *conditions*, and are modelled as fact-conditioned
+> invariants. Their real enforcement point is elsewhere (workspace creation, the
+> secret scanner); they exist in policy so that no policy file can override them.
 
 **Typed actions:**
 
@@ -615,7 +633,25 @@ deployment.execute · release.publish · architecture.change
 authentication.change · authorization.change · billing.spend · service.paid_addition
 ```
 
-**Facts declare their derivation.** Every fact carries `source: deterministic | model_assisted | human`. A `require_approval` may rest on any; **a `deny` must rest only on `deterministic` facts.** A model must never be the sole reason Conductor blocks work — a hallucinated block is indistinguishable from a real one and trains the user to override blocks.
+**Facts declare their derivation.** Every fact carries `source: deterministic | model_assisted | human`. A `require_approval` may rest on any; **a `deny` must rest only on `deterministic` facts** — meaning the facts that *rule* names in its `when:`, not every fact in the request (ADR-0010). A model must never be the sole reason Conductor blocks work — a hallucinated block is indistinguishable from a real one and trains the user to override blocks.
+
+> **SCOPED at S7 (ADR-0010).** Read as "every fact present", the sentence is a
+> **weakening vector**: one unrelated model-assisted observation anywhere in the
+> request would downgrade an otherwise-deterministic `deny` to
+> `require_approval`. That inverts the rule's purpose — it exists to stop a model
+> *causing* a block, not to let a model *remove* one. The cap therefore applies
+> only to the facts a rule's own `when:` clause depends on; a rule with no `when:`
+> is a standing policy statement and still denies.
+
+**Global policy** lives at `$XDG_CONFIG_HOME/conductor/policy.yaml`, falling back to
+`~/.config/conductor/policy.yaml` — the convention `Store::default_path` already uses.
+Project policy is `.conductor/policy.yaml` (§3.1). An absent file is not an error; a
+present, malformed one is, and stops the run (fail closed).
+
+**Expiry timestamps are RFC 3339, UTC only.** §4.3 writes `expires_at:
+2026-08-13T14:03:00Z`, and §2.2's dependency list contains no date crate. S7 hand-writes a
+UTC-only parser rather than adding one, and **rejects offsets** instead of guessing: an
+expiry an hour out is an exception outliving its grant.
 
 | Action | Deterministic fact source |
 |---|---|
@@ -1734,7 +1770,35 @@ deleting that test would silently untest the backstop.
 
 ---
 
-### S7 — Policy engine
+### S7 — Policy engine  ✅ **DONE**
+
+**Outcome.** Two-stage evaluation with a locked ceiling that provably bounds exceptions,
+22 typed actions with `unknown → deny` made structural, BLAKE3 snapshots pinned for a run's
+lifetime, deterministic fact extractors, `conductor policy explain` naming non-matching
+rules and why, and §4.2's eligibility gate as a pure function. **1024 precedence cells, all
+asserted**, against hand-written literal join/meet tables so a wrong operator cannot agree
+with itself. 86 new tests (**680 total**). Report: `docs/reports/S7-completion-report.md`.
+
+**`unknown → deny` is structural, not conventional.** `Action::parse` is *infallible* — it
+returns `Action`, never `Option`/`Result` — so there is no `.unwrap_or(Allow)` for a caller
+to write. An unrecognised name becomes `Action::Unknown(String)` whose `floor()` is `Deny`,
+and the floor participates in both the join and the exception clamp, so an exception cannot
+grant an unnamed action either.
+
+**`tool_interception` cannot gate, by type.** `ExecutionRequirements` is keyed by
+`GatingDimension`, which has no such variant; `tool_interception` is an `Informational` with
+no ordering and no accessor returning `Enforcement`. Two `compile_fail` doctests pin both.
+The YAML loader's rejection of the name is a courtesy, not the mechanism.
+
+**One stated invariant was vacuous as written** — see the §4.4 clarification: Stage 2's
+`max` join makes a project rule structurally incapable of loosening, so the ceiling is never
+what stops it. The ceiling's real work is on exceptions and grants, and S7's test exercises
+that path with an unlocked positive control.
+
+**A vacuity was caught in flight.** The first run-pinning mutation left the suite green:
+the fixture seeded one run and one snapshot, so "newest snapshot" and "this run's snapshot"
+were the same row. Reseeded with a second run pinned to the tightened policy; the mutation
+then fails.
 
 **Objective.** Typed actions, two-stage evaluation, snapshots, explain, eligibility gate.
 **Why now.** Sensitive actions now exist (S5 commits, S6 retries), and the spine has revealed which facts are needed.
@@ -1889,9 +1953,18 @@ Every row is a test. "Retry?" = an automatic agent attempt. "Human?" = execution
 | 27 | Stale worker wakes late | pause past lease, resume | fencing epoch stale | **all writes rejected** | no | no | successor unaffected |
 | 28 | **Agent reaches for the control socket** | agent connects to `conductor.sock` | connect denied (sandboxed) or attempt logged | finding; no grant created | no | **yes** if unsandboxed | `AWAITING_REVIEW` |
 | 29 | **`.conductor/` mutated on a run branch** | agent writes `APPROVED` | change rejected at reconciliation | never fetched; finding | no | **yes** | `AWAITING_REVIEW` |
-| 30 | **Ineligible execution mode** | sensitive task, caps below requirement | attempt never starts | refuse with dimension named | no | **yes** | `BLOCKED` |
+| 30 | **Ineligible execution mode** | sensitive task, caps below requirement | attempt never starts | refuse with dimension named | no | **yes** | `BLOCKED` | *(decided at S7, **enforced at S9** — see note)* |
 
 Rows 14, 15, 22, 24, 26, 27, 28, 29, 30 are the ones that most distinguish this design.
+
+**Note on row 30 — decided at S7, NOT YET ENFORCED (S9 owns the call site).**
+S7 implements `eligibility::check` as a pure function — requirements vs measured
+capabilities, stale-or-absent probe refuses, `tool_interception` structurally unable to
+satisfy a gating dimension — with full coverage including a positive control. It is **not
+wired into the attempt-launch path**: §4.2 says "before launching an attempt", but that is
+enforcement, which S9 owns, and wiring it at S7 would mean seeding a probe row into every
+pre-existing test. Until S9 does so, **row 30 must be scored `NOT RUN`, not `PASS`** — the
+decision is proven, the refusal is not yet reachable from a real launch.
 
 **Note on row 9 — "attempt 2 not started" was off by one (found at S6).**
 A fingerprint cannot be *identical* until it has been produced twice, so the earliest

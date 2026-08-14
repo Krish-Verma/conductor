@@ -5,15 +5,17 @@
 //! that keep two workers from writing the same generated path.
 //!
 //! S4 adds verification; S5 adds the Conductor-owned git effects and the
-//! vertical that drives one task from `PENDING` to `COMPLETE`.
+//! vertical that drives one task from `PENDING` to `COMPLETE`; S6 adds bounded
+//! repair; S7 adds the policy engine and §4.2's eligibility gate.
 //!
-//! Policy (S7), approvals (S8), repair (S6) and packets (S12) belong to the
-//! slices that own them and are deliberately absent.
+//! Approvals (S8), enforcement (S9) and packets (S12) belong to the slices that
+//! own them and are deliberately absent.
 
 pub mod containment;
 pub mod effects;
 pub mod lease;
 pub mod paths;
+pub mod policy;
 pub mod recovery;
 pub mod repair;
 pub mod spec;
