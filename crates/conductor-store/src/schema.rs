@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::error::{StoreError, StoreResult};
 
 /// The highest schema version this binary understands.
-pub const SUPPORTED_SCHEMA_VERSION: i64 = 1;
+pub const SUPPORTED_SCHEMA_VERSION: i64 = 2;
 
 /// Pragmas as they are *set*, in application order.
 ///
@@ -273,4 +273,36 @@ CREATE TABLE containment_probe (
   capabilities TEXT NOT NULL, probed_at INTEGER NOT NULL,
   UNIQUE(adapter, adapter_version, launcher, launcher_version, os_version)
 );
+"#;
+
+/// Schema v2 — `attempt.state`.
+///
+/// **Why a migration and not an edit to [`SCHEMA_V1`].** Migrations are
+/// forward-only and v1 has shipped; editing it in place would make two databases
+/// that both call themselves version 1 disagree about their columns, which is
+/// the failure mode versioned migrations exist to prevent. The DDL fidelity test
+/// also compares `SCHEMA_V1` against master plan Part 5.1 statement for
+/// statement, and that comparison must keep meaning what it says.
+///
+/// **Why the column is needed.** §5.2's attempt machine has eight states; v1's
+/// `attempt.outcome` can express five, none of which is `CREATED`, `STARTING` or
+/// `ACTIVE`. A supervisor therefore had no way to record that an attempt was in
+/// flight — which is precisely what §4.7's startup recovery reads in order to
+/// tell "this run had a process" from "this run never started one". The
+/// contradiction was surfaced at S1 and left for S3 on the grounds that S3 knows
+/// what the supervisor actually needs.
+///
+/// `DEFAULT 'CREATED'` is the honest value for a pre-existing row: v1 recorded
+/// no lifecycle position, so the only thing that can be said about such an
+/// attempt is that it exists. Recovery treats it as in-flight and looks at the
+/// world, which is the safe direction — the unsafe direction would be defaulting
+/// to a terminal state and skipping reconciliation.
+pub const SCHEMA_V2: &str = r#"
+ALTER TABLE attempt ADD COLUMN state TEXT NOT NULL DEFAULT 'CREATED';
+
+-- Startup recovery's first question is "which attempts were in flight?", and
+-- it asks it on every start. Partial, because the in-flight set is tiny and
+-- permanently so while the terminal set grows without bound.
+CREATE INDEX ix_attempt_in_flight ON attempt(state)
+  WHERE state IN ('CREATED','STARTING','ACTIVE');
 "#;

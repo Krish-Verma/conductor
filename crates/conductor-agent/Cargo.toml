@@ -1,0 +1,30 @@
+[package]
+name = "conductor-agent"
+description = "The AgentAdapter trait and the fake agent. Adapters are pure translation: build argv+env, parse lines, classify exits — they never spawn."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+# The fake agent itself: a real subprocess driven by a scenario file. It is a
+# binary rather than an in-process fake because master plan §6.1 requires
+# Conductor to drive agents as subprocesses — an in-process fake could not be
+# SIGKILLed, could not survive the supervisor's death, and would therefore be
+# unable to exercise the one property S3 exists to prove.
+name = "conductor-fake-agent"
+path = "src/bin/conductor-fake-agent.rs"
+
+[dependencies]
+conductor-core.workspace = true
+# kill(2) and _exit(2): the scenario catalogue needs a process that dies exactly
+# where it says it does, and std offers neither a signal send nor an exit that
+# skips destructors. Already in Cargo.lock (transitively), so this adds no new
+# package to the build.
+libc = "0.2.189"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+
+[dev-dependencies]
+tempfile = "3.27.0"

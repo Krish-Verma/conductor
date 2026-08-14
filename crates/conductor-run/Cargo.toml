@@ -1,6 +1,6 @@
 [package]
 name = "conductor-run"
-description = "Conductor runtime. S2.5 scope: the containment probe harness only."
+description = "Conductor runtime: containment probing, agent supervision, leases and startup recovery."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,9 +13,25 @@ publish.workspace = true
 name = "conductor-probe-action"
 path = "src/bin/conductor-probe-action.rs"
 
+[[bin]]
+# The foreground worker (§2.4). A separate process because the crash matrix has
+# to kill Conductor while the agent keeps running, and a supervisor that lived
+# inside the test binary could not demonstrate that (§6.1).
+name = "conductor-s3-worker"
+path = "src/bin/conductor-s3-worker.rs"
+
 [dependencies]
+conductor-agent.workspace = true
 conductor-core.workspace = true
+conductor-git.workspace = true
 conductor-store.workspace = true
+# SIGTERM, kill(pid, 0) and proc_pidinfo. std offers no way to send a signal
+# other than SIGKILL (`Child::kill`), no way to ask whether an arbitrary pid is
+# alive, and no way to read a process start time — and §6.4 requires
+# "SIGTERM, grace, SIGKILL" while §4.7 step 3 requires "alive **and** start-time
+# matches". Already in Cargo.lock transitively, so no new package enters the
+# build. `tokio` was considered and not taken: see the S3 completion report.
+libc = "0.2.189"
 # Same version as conductor-store, so cargo unifies it and no new package enters
 # the lock. Needed because master plan S2.5 places the `containment_probe` cache
 # in this crate, and the store hands out `rusqlite::Connection`.
@@ -25,4 +41,6 @@ serde_json = "1.0.151"
 thiserror = "2.0.20"
 
 [dev-dependencies]
+libc = "0.2.189"
+serde_json = "1.0.151"
 tempfile = "3.27.0"

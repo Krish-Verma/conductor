@@ -1,0 +1,930 @@
+{
+  "meta": {
+    "claim_goes_through": "conductor_store::Store::claim_next_run (production code, production open path)",
+    "claim_sql": "UPDATE run\n   SET state = CASE WHEN state='RECONCILING' THEN 'RECONCILING' ELSE 'RUNNING' END,\n       lease_owner=?1, lease_expires_at=?2,\n       lease_epoch = lease_epoch + 1\n WHERE id = (SELECT id FROM run\n              WHERE state IN ('READY','RECONCILING')\n                AND (lease_expires_at IS NULL OR lease_expires_at < ?3)\n              ORDER BY priority, created_at LIMIT 1)\nRETURNING id, task_id, policy_hash, lease_epoch, state",
+    "conductor_store_version": "0.1.0",
+    "cpu_count": 10,
+    "fullfsync_off": true,
+    "git_commit": "747fe9e508b829df2f244873cddd5174c0e164b0",
+    "git_dirty": true,
+    "instrument": "conductor-claim-bench",
+    "label": "nofullfsync_contended",
+    "latency_definition": "wall time of Store::claim_next_run: BEGIN IMMEDIATE -> UPDATE..RETURNING -> INSERT event -> COMMIT, successful claims only",
+    "lease_ms": 60000,
+    "os_build_version": "25G72",
+    "os_product_version": "26.6",
+    "percentile_method": "linear interpolation on sorted successful-claim latencies",
+    "pragmas": {
+      "busy_timeout": "5000",
+      "checkpoint_fullfsync": "0",
+      "foreign_keys": "1",
+      "fullfsync": "0",
+      "journal_mode": "wal",
+      "synchronous": "2"
+    },
+    "process_model": "separate writer processes, one connection each (matches S0)",
+    "purpose": "ADR-0004 falsification trigger 1: re-measure the claim under the shipping rusqlite stack",
+    "repeat": 3,
+    "rows": 2000,
+    "rusqlite_version": "0.40.2",
+    "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "slice": "S1",
+    "sqlite_version": "3.53.2",
+    "started_unix_s": 1786667534,
+    "started_utc": "2026-08-14T00:32:14Z",
+    "think_ms": 1.0,
+    "uname": "Darwin 25.6.0 arm64",
+    "work_dir": "/var/folders/6c/zlyy9xz11gx6kly82c3cgkwh0000gn/T/conductor_s1_bench_7572",
+    "writer_counts": [
+      1,
+      4,
+      16
+    ]
+  },
+  "runs": [
+    {
+      "active_writers": 1,
+      "busy_errors": 0,
+      "claims": 2000,
+      "duplicate_claims": 0,
+      "empty_attempts": 1,
+      "fatals": [],
+      "fullfsync_off": true,
+      "idle_writers": 0,
+      "invariants": {
+        "all_pass": true,
+        "i1_no_duplicate_ownership": {
+          "detail": {
+            "db_ready": 0,
+            "db_running": 2000,
+            "db_total": 2000,
+            "distinct_ids_claimed": 2000,
+            "duplicate_run_ids": {},
+            "event_distinct_run_ids": 2000,
+            "event_rows": 2000,
+            "event_wrong_kind": 0,
+            "orphan_events": 0,
+            "rows_seeded": 2000,
+            "total_claims_recorded_by_workers": 2000
+          },
+          "pass": true
+        },
+        "i2_no_partial_transition": {
+          "detail": {
+            "ready_with_lease_owner": 0,
+            "running_with_null_lease_expires_at": 0,
+            "running_with_null_lease_owner": 0,
+            "running_without_claim_event": 0
+          },
+          "pass": true
+        },
+        "i3_lease_epoch_exactly_one": {
+          "detail": {
+            "epoch_max": 1,
+            "epoch_min": 1,
+            "returned_epochs_not_1": 0,
+            "rows_with_epoch_not_1": 0
+          },
+          "pass": true
+        },
+        "i4_integrity_check": {
+          "detail": {
+            "foreign_key_check_violations": 0,
+            "integrity_check": [
+              "ok"
+            ]
+          },
+          "pass": true
+        }
+      },
+      "iterations": 2001,
+      "latency": {
+        "count": 2000,
+        "max_ms": 7.206708,
+        "mean_ms": 0.28628379299999995,
+        "median_ms": 0.2422295,
+        "min_ms": 0.089708,
+        "p95_ms": 0.48042084999999995,
+        "p99_ms": 1.1072103299999996
+      },
+      "other_errors": [],
+      "per_worker_claims": {
+        "0": 2000
+      },
+      "repeat": 0,
+      "rows": 2000,
+      "think_ms": 1.0,
+      "throughput_claims_per_s": 636.5500346772885,
+      "wall_s": 3.141936833,
+      "worker_exit_codes": [
+        0
+      ],
+      "writers": 1
+    },
+    {
+      "active_writers": 1,
+      "busy_errors": 0,
+      "claims": 2000,
+      "duplicate_claims": 0,
+      "empty_attempts": 1,
+      "fatals": [],
+      "fullfsync_off": true,
+      "idle_writers": 0,
+      "invariants": {
+        "all_pass": true,
+        "i1_no_duplicate_ownership": {
+          "detail": {
+            "db_ready": 0,
+            "db_running": 2000,
+            "db_total": 2000,
+            "distinct_ids_claimed": 2000,
+            "duplicate_run_ids": {},
+            "event_distinct_run_ids": 2000,
+            "event_rows": 2000,
+            "event_wrong_kind": 0,
+            "orphan_events": 0,
+            "rows_seeded": 2000,
+            "total_claims_recorded_by_workers": 2000
+          },
+          "pass": true
+        },
+        "i2_no_partial_transition": {
+          "detail": {
+            "ready_with_lease_owner": 0,
+            "running_with_null_lease_expires_at": 0,
+            "running_with_null_lease_owner": 0,
+            "running_without_claim_event": 0
+          },
+          "pass": true
+        },
+        "i3_lease_epoch_exactly_one": {
+          "detail": {
+            "epoch_max": 1,
+            "epoch_min": 1,
+            "returned_epochs_not_1": 0,
+            "rows_with_epoch_not_1": 0
+          },
+          "pass": true
+        },
+        "i4_integrity_check": {
+          "detail": {
+            "foreign_key_check_violations": 0,
+            "integrity_check": [
+              "ok"
+            ]
+          },
+          "pass": true
+        }
+      },
+      "iterations": 2001,
+      "latency": {
+        "count": 2000,
+        "max_ms": 2.327375,
+        "mean_ms": 0.26192729449999985,
+        "median_ms": 0.245313,
+        "min_ms": 0.07625,
+        "p95_ms": 0.42671605000000007,
+        "p99_ms": 0.68928417
+      },
+      "other_errors": [],
+      "per_worker_claims": {
+        "0": 2000
+      },
+      "repeat": 1,
+      "rows": 2000,
+      "think_ms": 1.0,
+      "throughput_claims_per_s": 661.4631107799345,
+      "wall_s": 3.023600209,
+      "worker_exit_codes": [
+        0
+      ],
+      "writers": 1
+    },
+    {
+      "active_writers": 1,
+      "busy_errors": 0,
+      "claims": 2000,
+      "duplicate_claims": 0,
+      "empty_attempts": 1,
+      "fatals": [],
+      "fullfsync_off": true,
+      "idle_writers": 0,
+      "invariants": {
+        "all_pass": true,
+        "i1_no_duplicate_ownership": {
+          "detail": {
+            "db_ready": 0,
+            "db_running": 2000,
+            "db_total": 2000,
+            "distinct_ids_claimed": 2000,
+            "duplicate_run_ids": {},
+            "event_distinct_run_ids": 2000,
+            "event_rows": 2000,
+            "event_wrong_kind": 0,
+            "orphan_events": 0,
+            "rows_seeded": 2000,
+            "total_claims_recorded_by_workers": 2000
+          },
+          "pass": true
+        },
+        "i2_no_partial_transition": {
+          "detail": {
+            "ready_with_lease_owner": 0,
+            "running_with_null_lease_expires_at": 0,
+            "running_with_null_lease_owner": 0,
+            "running_without_claim_event": 0
+          },
+          "pass": true
+        },
+        "i3_lease_epoch_exactly_one": {
+          "detail": {
+            "epoch_max": 1,
+            "epoch_min": 1,
+            "returned_epochs_not_1": 0,
+            "rows_with_epoch_not_1": 0
+          },
+          "pass": true
+        },
+        "i4_integrity_check": {
+          "detail": {
+            "foreign_key_check_violations": 0,
+            "integrity_check": [
+              "ok"
+            ]
+          },
+          "pass": true
+        }
+      },
+      "iterations": 2001,
+      "latency": {
+        "count": 2000,
+        "max_ms": 12.442042,
+        "mean_ms": 0.3119986455000003,
+        "median_ms": 0.267375,
+        "min_ms": 0.070917,
+        "p95_ms": 0.6510565499999998,
+        "p99_ms": 1.1643919099999995
+      },
+      "other_errors": [],
+      "per_worker_claims": {
+        "0": 2000
+      },
+      "repeat": 2,
+      "rows": 2000,
+      "think_ms": 1.0,
+      "throughput_claims_per_s": 637.0476155666089,
+      "wall_s": 3.13948275,
+      "worker_exit_codes": [
+        0
+      ],
+      "writers": 1
+    },
+    {
+      "active_writers": 4,
+      "busy_errors": 0,
+      "claims": 2000,
+      "duplicate_claims": 0,
+      "empty_attempts": 4,
+      "fatals": [],
+      "fullfsync_off": true,
+      "idle_writers": 0,
+      "invariants": {
+        "all_pass": true,
+        "i1_no_duplicate_ownership": {
+          "detail": {
+            "db_ready": 0,
+            "db_running": 2000,
+            "db_total": 2000,
+            "distinct_ids_claimed": 2000,
+            "duplicate_run_ids": {},
+            "event_distinct_run_ids": 2000,
+            "event_rows": 2000,
+            "event_wrong_kind": 0,
+            "orphan_events": 0,
+            "rows_seeded": 2000,
+            "total_claims_recorded_by_workers": 2000
+          },
+          "pass": true
+        },
+        "i2_no_partial_transition": {
+          "detail": {
+            "ready_with_lease_owner": 0,
+            "running_with_null_lease_expires_at": 0,
+            "running_with_null_lease_owner": 0,
+            "running_without_claim_event": 0
+          },
+          "pass": true
+        },
+        "i3_lease_epoch_exactly_one": {
+          "detail": {
+            "epoch_max": 1,
+            "epoch_min": 1,
+            "returned_epochs_not_1": 0,
+            "rows_with_epoch_not_1": 0
+          },
+          "pass": true
+        },
+        "i4_integrity_check": {
+          "detail": {
+            "foreign_key_check_violations": 0,
+            "integrity_check": [
+              "ok"
+            ]
+          },
+          "pass": true
+        }
+      },
+      "iterations": 2004,
+      "latency": {
+        "count": 2000,
+        "max_ms": 91.64425,
+        "mean_ms": 1.0399365014999995,
+        "median_ms": 0.343125,
+        "min_ms": 0.090167,
+        "p95_ms": 3.8990728999999997,
+        "p99_ms": 10.42841825
+      },
+      "other_errors": [],
+      "per_worker_claims": {
+        "0": 462,
+        "1": 508,
+        "2": 555,
+        "3": 475
+      },
+      "repeat": 0,
+      "rows": 2000,
+      "think_ms": 1.0,
+      "throughput_claims_per_s": 1743.8881529012392,
+      "wall_s": 1.146862542,
+      "worker_exit_codes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "writers": 4
+    },
+    {
+      "active_writers": 4,
+      "busy_errors": 0,
+      "claims": 2000,
+      "duplicate_claims": 0,
+      "empty_attempts": 4,
+      "fatals": [],
+      "fullfsync_off": true,
+      "idle_writers": 0,
+      "invariants": {
+        "all_pass": true,
+        "i1_no_duplicate_ownership": {
+          "detail": {
+            "db_ready": 0,
+            "db_running": 2000,
+            "db_total": 2000,
+            "distinct_ids_claimed": 2000,
+            "duplicate_run_ids": {},
+            "event_distinct_run_ids": 2000,
+            "event_rows": 2000,
+            "event_wrong_kind": 0,
+            "orphan_events": 0,
+            "rows_seeded": 2000,
+            "total_claims_recorded_by_workers": 2000
+          },
+          "pass": true
+        },
+        "i2_no_partial_transition": {
+          "detail": {
+            "ready_with_lease_owner": 0,
+            "running_with_null_lease_expires_at": 0,
+            "running_with_null_lease_owner": 0,
+            "running_without_claim_event": 0
+          },
+          "pass": true
+        },
+        "i3_lease_epoch_exactly_one": {
+          "detail": {
+            "epoch_max": 1,
+            "epoch_min": 1,
+            "returned_epochs_not_1": 0,
+            "rows_with_epoch_not_1": 0
+          },
+          "pass": true
+        },
+        "i4_integrity_check": {
+          "detail": {
+            "foreign_key_check_violations": 0,
+            "integrity_check": [
+              "ok"
+            ]
+          },
+          "pass": true
+        }
+      },
+      "iterations": 2004,
+      "latency": {
+        "count": 2000,
+        "max_ms": 93.185,
+        "mean_ms": 1.1971195445000002,
+        "median_ms": 0.342271,
+        "min_ms": 0.099125,
+        "p95_ms": 4.0815229,
+        "p99_ms": 10.47979833
+      },
+      "other_errors": [],
+      "per_worker_claims": {
+        "0": 491,
+        "1": 516,
+        "2": 517,
+        "3": 476
+      },
+      "repeat": 1,
+      "rows": 2000,
+      "think_ms": 1.0,
+      "throughput_claims_per_s": 1622.170968504832,
+      "wall_s": 1.232915666,
+      "worker_exit_codes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "writers": 4
+    },
+    {
+      "active_writers": 4,
+      "busy_errors": 0,
+      "claims": 2000,
+      "duplicate_claims": 0,
+      "empty_attempts": 4,
+      "fatals": [],
+      "fullfsync_off": true,
+      "idle_writers": 0,
+      "invariants": {
+        "all_pass": true,
+        "i1_no_duplicate_ownership": {
+          "detail": {
+            "db_ready": 0,
+            "db_running": 2000,
+            "db_total": 2000,
+            "distinct_ids_claimed": 2000,
+            "duplicate_run_ids": {},
+            "event_distinct_run_ids": 2000,
+            "event_rows": 2000,
+            "event_wrong_kind": 0,
+            "orphan_events": 0,
+            "rows_seeded": 2000,
+            "total_claims_recorded_by_workers": 2000
+          },
+          "pass": true
+        },
+        "i2_no_partial_transition": {
+          "detail": {
+            "ready_with_lease_owner": 0,
+            "running_with_null_lease_expires_at": 0,
+            "running_with_null_lease_owner": 0,
+            "running_without_claim_event": 0
+          },
+          "pass": true
+        },
+        "i3_lease_epoch_exactly_one": {
+          "detail": {
+            "epoch_max": 1,
+            "epoch_min": 1,
+            "returned_epochs_not_1": 0,
+            "rows_with_epoch_not_1": 0
+          },
+          "pass": true
+        },
+        "i4_integrity_check": {
+          "detail": {
+            "foreign_key_check_violations": 0,
+            "integrity_check": [
+              "ok"
+            ]
+          },
+          "pass": true
+        }
+      },
+      "iterations": 2004,
+      "latency": {
+        "count": 2000,
+        "max_ms": 94.140833,
+        "mean_ms": 1.180610495999999,
+        "median_ms": 0.35381250000000003,
+        "min_ms": 0.119292,
+        "p95_ms": 4.0095773999999995,
+        "p99_ms": 10.34649384
+      },
+      "other_errors": [],
+      "per_worker_claims": {
+        "0": 485,
+        "1": 547,
+        "2": 456,
+        "3": 512
+      },
+      "repeat": 2,
+      "rows": 2000,
+      "think_ms": 1.0,
+      "throughput_claims_per_s": 1647.1954994790872,
+      "wall_s": 1.214184959,
+      "worker_exit_codes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "writers": 4
+    },
+    {
+      "active_writers": 16,
+      "busy_errors": 0,
+      "claims": 2000,
+      "duplicate_claims": 0,
+      "empty_attempts": 16,
+      "fatals": [],
+      "fullfsync_off": true,
+      "idle_writers": 0,
+      "invariants": {
+        "all_pass": true,
+        "i1_no_duplicate_ownership": {
+          "detail": {
+            "db_ready": 0,
+            "db_running": 2000,
+            "db_total": 2000,
+            "distinct_ids_claimed": 2000,
+            "duplicate_run_ids": {},
+            "event_distinct_run_ids": 2000,
+            "event_rows": 2000,
+            "event_wrong_kind": 0,
+            "orphan_events": 0,
+            "rows_seeded": 2000,
+            "total_claims_recorded_by_workers": 2000
+          },
+          "pass": true
+        },
+        "i2_no_partial_transition": {
+          "detail": {
+            "ready_with_lease_owner": 0,
+            "running_with_null_lease_expires_at": 0,
+            "running_with_null_lease_owner": 0,
+            "running_without_claim_event": 0
+          },
+          "pass": true
+        },
+        "i3_lease_epoch_exactly_one": {
+          "detail": {
+            "epoch_max": 1,
+            "epoch_min": 1,
+            "returned_epochs_not_1": 0,
+            "rows_with_epoch_not_1": 0
+          },
+          "pass": true
+        },
+        "i4_integrity_check": {
+          "detail": {
+            "foreign_key_check_violations": 0,
+            "integrity_check": [
+              "ok"
+            ]
+          },
+          "pass": true
+        }
+      },
+      "iterations": 2016,
+      "latency": {
+        "count": 2000,
+        "max_ms": 767.176667,
+        "mean_ms": 6.221275991999999,
+        "median_ms": 0.4089375,
+        "min_ms": 0.087333,
+        "p95_ms": 10.370935099999999,
+        "p99_ms": 121.47171791
+      },
+      "other_errors": [],
+      "per_worker_claims": {
+        "0": 100,
+        "1": 145,
+        "10": 55,
+        "11": 204,
+        "12": 105,
+        "13": 42,
+        "14": 102,
+        "15": 180,
+        "2": 32,
+        "3": 128,
+        "4": 273,
+        "5": 63,
+        "6": 238,
+        "7": 73,
+        "8": 112,
+        "9": 148
+      },
+      "repeat": 0,
+      "rows": 2000,
+      "think_ms": 1.0,
+      "throughput_claims_per_s": 1796.1733873113371,
+      "wall_s": 1.11347825,
+      "worker_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "writers": 16
+    },
+    {
+      "active_writers": 16,
+      "busy_errors": 0,
+      "claims": 2000,
+      "duplicate_claims": 0,
+      "empty_attempts": 16,
+      "fatals": [],
+      "fullfsync_off": true,
+      "idle_writers": 0,
+      "invariants": {
+        "all_pass": true,
+        "i1_no_duplicate_ownership": {
+          "detail": {
+            "db_ready": 0,
+            "db_running": 2000,
+            "db_total": 2000,
+            "distinct_ids_claimed": 2000,
+            "duplicate_run_ids": {},
+            "event_distinct_run_ids": 2000,
+            "event_rows": 2000,
+            "event_wrong_kind": 0,
+            "orphan_events": 0,
+            "rows_seeded": 2000,
+            "total_claims_recorded_by_workers": 2000
+          },
+          "pass": true
+        },
+        "i2_no_partial_transition": {
+          "detail": {
+            "ready_with_lease_owner": 0,
+            "running_with_null_lease_expires_at": 0,
+            "running_with_null_lease_owner": 0,
+            "running_without_claim_event": 0
+          },
+          "pass": true
+        },
+        "i3_lease_epoch_exactly_one": {
+          "detail": {
+            "epoch_max": 1,
+            "epoch_min": 1,
+            "returned_epochs_not_1": 0,
+            "rows_with_epoch_not_1": 0
+          },
+          "pass": true
+        },
+        "i4_integrity_check": {
+          "detail": {
+            "foreign_key_check_violations": 0,
+            "integrity_check": [
+              "ok"
+            ]
+          },
+          "pass": true
+        }
+      },
+      "iterations": 2016,
+      "latency": {
+        "count": 2000,
+        "max_ms": 876.202,
+        "mean_ms": 7.714790186999998,
+        "median_ms": 0.605416,
+        "min_ms": 0.095667,
+        "p95_ms": 22.604541349999998,
+        "p99_ms": 120.62978717
+      },
+      "other_errors": [],
+      "per_worker_claims": {
+        "0": 91,
+        "1": 121,
+        "10": 155,
+        "11": 82,
+        "12": 94,
+        "13": 246,
+        "14": 103,
+        "15": 128,
+        "2": 232,
+        "3": 58,
+        "4": 98,
+        "5": 215,
+        "6": 101,
+        "7": 200,
+        "8": 69,
+        "9": 7
+      },
+      "repeat": 1,
+      "rows": 2000,
+      "think_ms": 1.0,
+      "throughput_claims_per_s": 1489.5620333255215,
+      "wall_s": 1.342676542,
+      "worker_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "writers": 16
+    },
+    {
+      "active_writers": 15,
+      "busy_errors": 0,
+      "claims": 2000,
+      "duplicate_claims": 0,
+      "empty_attempts": 16,
+      "fatals": [],
+      "fullfsync_off": true,
+      "idle_writers": 1,
+      "invariants": {
+        "all_pass": true,
+        "i1_no_duplicate_ownership": {
+          "detail": {
+            "db_ready": 0,
+            "db_running": 2000,
+            "db_total": 2000,
+            "distinct_ids_claimed": 2000,
+            "duplicate_run_ids": {},
+            "event_distinct_run_ids": 2000,
+            "event_rows": 2000,
+            "event_wrong_kind": 0,
+            "orphan_events": 0,
+            "rows_seeded": 2000,
+            "total_claims_recorded_by_workers": 2000
+          },
+          "pass": true
+        },
+        "i2_no_partial_transition": {
+          "detail": {
+            "ready_with_lease_owner": 0,
+            "running_with_null_lease_expires_at": 0,
+            "running_with_null_lease_owner": 0,
+            "running_without_claim_event": 0
+          },
+          "pass": true
+        },
+        "i3_lease_epoch_exactly_one": {
+          "detail": {
+            "epoch_max": 1,
+            "epoch_min": 1,
+            "returned_epochs_not_1": 0,
+            "rows_with_epoch_not_1": 0
+          },
+          "pass": true
+        },
+        "i4_integrity_check": {
+          "detail": {
+            "foreign_key_check_violations": 0,
+            "integrity_check": [
+              "ok"
+            ]
+          },
+          "pass": true
+        }
+      },
+      "iterations": 2016,
+      "latency": {
+        "count": 2000,
+        "max_ms": 1084.7803330000002,
+        "mean_ms": 5.958109641999998,
+        "median_ms": 0.405896,
+        "min_ms": 0.094625,
+        "p95_ms": 20.42147114999999,
+        "p99_ms": 119.04769641999998
+      },
+      "other_errors": [],
+      "per_worker_claims": {
+        "0": 18,
+        "1": 145,
+        "10": 80,
+        "11": 155,
+        "12": 171,
+        "13": 189,
+        "14": 0,
+        "15": 255,
+        "2": 196,
+        "3": 160,
+        "4": 147,
+        "5": 79,
+        "6": 108,
+        "7": 132,
+        "8": 159,
+        "9": 6
+      },
+      "repeat": 2,
+      "rows": 2000,
+      "think_ms": 1.0,
+      "throughput_claims_per_s": 1681.1695560367436,
+      "wall_s": 1.189648,
+      "worker_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "writers": 16
+    }
+  ],
+  "summary": [
+    {
+      "active_writers_mean": 1.0,
+      "busy_errors": 0,
+      "claims": 6000,
+      "duplicate_claims": 0,
+      "invariants_all_pass": true,
+      "iterations": 6003,
+      "latency": {
+        "count": 6000,
+        "max_ms": 12.442042,
+        "mean_ms": 0.2867365776666656,
+        "median_ms": 0.249187,
+        "min_ms": 0.070917,
+        "p95_ms": 0.51458305,
+        "p99_ms": 0.9861680900000027
+      },
+      "other_error_count": 0,
+      "repeats": 3,
+      "throughput_claims_per_s_mean": 645.0202536746106,
+      "writers": 1
+    },
+    {
+      "active_writers_mean": 4.0,
+      "busy_errors": 0,
+      "claims": 6000,
+      "duplicate_claims": 0,
+      "invariants_all_pass": true,
+      "iterations": 6012,
+      "latency": {
+        "count": 6000,
+        "max_ms": 94.140833,
+        "mean_ms": 1.1392221806666676,
+        "median_ms": 0.3462505,
+        "min_ms": 0.090167,
+        "p95_ms": 4.01959135,
+        "p99_ms": 10.405583750000002
+      },
+      "other_error_count": 0,
+      "repeats": 3,
+      "throughput_claims_per_s_mean": 1671.084873628386,
+      "writers": 4
+    },
+    {
+      "active_writers_mean": 15.666666666666666,
+      "busy_errors": 0,
+      "claims": 6000,
+      "duplicate_claims": 0,
+      "invariants_all_pass": true,
+      "iterations": 6048,
+      "latency": {
+        "count": 6000,
+        "max_ms": 1084.7803330000002,
+        "mean_ms": 6.631391940333337,
+        "median_ms": 0.430125,
+        "min_ms": 0.087333,
+        "p95_ms": 21.035994100000007,
+        "p99_ms": 121.06872842000001
+      },
+      "other_error_count": 0,
+      "repeats": 3,
+      "throughput_claims_per_s_mean": 1655.6349922245342,
+      "writers": 16
+    }
+  ]
+}

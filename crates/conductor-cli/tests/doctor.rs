@@ -79,7 +79,10 @@ fn init_store_is_the_only_way_doctor_creates_a_database() {
     assert_eq!(report["ok"], true);
     assert_eq!(report["store"]["exists"], true);
     assert_eq!(report["store"]["healthy"], true);
-    assert_eq!(report["store"]["schema_version"], 1);
+    assert_eq!(
+        report["store"]["schema_version"],
+        conductor_store::schema::SUPPORTED_SCHEMA_VERSION
+    );
     assert_eq!(report["store"]["integrity_check"][0], "ok");
     assert_eq!(report["store"]["foreign_key_violations"], 0);
     assert_eq!(
@@ -102,7 +105,10 @@ fn init_store_is_the_only_way_doctor_creates_a_database() {
     // A second, plain run is green and still does not migrate anything.
     let again = run(&["doctor", "--json", "--store", &store_arg(&db)]);
     assert_eq!(again.status.code(), Some(0));
-    assert_eq!(json(&again)["store"]["schema_version"], 1);
+    assert_eq!(
+        json(&again)["store"]["schema_version"],
+        conductor_store::schema::SUPPORTED_SCHEMA_VERSION
+    );
 }
 
 #[test]

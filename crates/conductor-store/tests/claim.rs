@@ -19,9 +19,19 @@ fn claim_sql_is_the_statement_from_section_4_7() {
     // test, loudly.
     assert!(CLAIM_SQL.contains("UPDATE run"));
     assert!(CLAIM_SQL.contains("lease_epoch = lease_epoch + 1"));
-    assert!(CLAIM_SQL.contains("WHERE state IN ('READY','RECOVERING')"));
+    // S3 resolved §4.7's contradiction: `RECOVERING` is not one of §5.2's
+    // states, so the predicate selected a value nothing could ever write.
+    assert!(CLAIM_SQL.contains("WHERE state IN ('READY','RECONCILING')"));
+    assert!(!CLAIM_SQL.contains("RECOVERING"));
+    // A claimed RECONCILING run still owes a reconciliation, so the claim takes
+    // ownership without rewriting the state — §5.2 has no RECONCILING → RUNNING
+    // edge, and manufacturing one would lose the fact that the repository has
+    // not been looked at yet.
+    assert!(
+        CLAIM_SQL.contains("CASE WHEN state='RECONCILING' THEN 'RECONCILING' ELSE 'RUNNING' END")
+    );
     assert!(CLAIM_SQL.contains("ORDER BY priority, created_at LIMIT 1"));
-    assert!(CLAIM_SQL.contains("RETURNING id, task_id, policy_hash, lease_epoch"));
+    assert!(CLAIM_SQL.contains("RETURNING id, task_id, policy_hash, lease_epoch, state"));
 }
 
 #[test]
@@ -142,8 +152,8 @@ fn second_claim_of_the_same_run_bumps_the_epoch_again() {
         .expect("a run");
     store
         .conn()
-        .execute("UPDATE run SET state='RECOVERING' WHERE id='r-0001'", [])
-        .expect("re-arm as RECOVERING");
+        .execute("UPDATE run SET state='RECONCILING' WHERE id='r-0001'", [])
+        .expect("re-arm as RECONCILING");
 
     let second = store
         .claim_next_run("worker-b", NOW + LEASE_MS + 1, LEASE_MS)
@@ -180,7 +190,74 @@ fn claim_returns_none_when_nothing_is_eligible() {
 }
 
 #[test]
-fn claim_covers_both_ready_and_recovering() {
+fn claim_covers_both_ready_and_reconciling() {
+    let (_dir, mut store) = common::temp_store();
+    common::seed_runs(
+        &mut store,
+        &[SeedRun::ready("r-0001", 100, 1).with_state("RECONCILING")],
+    )
+    .expect("seed");
+
+    let claimed = store
+        .claim_next_run("worker-a", NOW, LEASE_MS)
+        .expect("claim")
+        .expect("a RECONCILING run with no live lease is what a restart must take");
+    assert_eq!(claimed.run_id.as_str(), "r-0001");
+}
+
+#[test]
+fn claiming_a_reconciling_run_leaves_it_reconciling() {
+    // §5.2's task machine has no RECONCILING → RUNNING edge, and the state is
+    // the record that Conductor still owes this run a look at the repository.
+    // A claim that rewrote it to RUNNING would erase that obligation, and the
+    // next crash would have nothing to recover from.
+    let (_dir, mut store) = common::temp_store();
+    common::seed_runs(
+        &mut store,
+        &[SeedRun::ready("r-0001", 100, 1).with_state("RECONCILING")],
+    )
+    .expect("seed");
+
+    let claimed = store
+        .claim_next_run("worker-a", NOW, LEASE_MS)
+        .expect("claim")
+        .expect("a run");
+
+    assert_eq!(claimed.state, conductor_core::RunState::Reconciling);
+    assert_eq!(
+        common::count(
+            &store,
+            "SELECT COUNT(*) FROM run WHERE id='r-0001' AND state='RECONCILING'"
+        ),
+        1,
+        "the claim must not manufacture a RECONCILING → RUNNING transition"
+    );
+    assert_eq!(claimed.lease_epoch, 1, "ownership still moved");
+}
+
+#[test]
+fn claiming_a_ready_run_makes_it_running() {
+    let (_dir, mut store) = common::temp_store();
+    common::seed_ready_runs(&mut store, 1).expect("seed");
+
+    let claimed = store
+        .claim_next_run("worker-a", NOW, LEASE_MS)
+        .expect("claim")
+        .expect("a run");
+
+    assert_eq!(claimed.state, conductor_core::RunState::Running);
+    assert_eq!(
+        common::count(&store, "SELECT COUNT(*) FROM run WHERE state='RUNNING'"),
+        1
+    );
+}
+
+#[test]
+fn a_run_left_in_the_deleted_recovering_state_is_not_claimable() {
+    // Nothing writes 'RECOVERING' any more. If a database somehow contains one,
+    // it must be inert rather than quietly claimable: the S1 predicate's dead
+    // disjunct is the bug being closed, and re-admitting the value here would
+    // reopen it.
     let (_dir, mut store) = common::temp_store();
     common::seed_runs(
         &mut store,
@@ -188,11 +265,12 @@ fn claim_covers_both_ready_and_recovering() {
     )
     .expect("seed");
 
-    let claimed = store
-        .claim_next_run("worker-a", NOW, LEASE_MS)
-        .expect("claim")
-        .expect("RECOVERING is claimable per §4.7");
-    assert_eq!(claimed.run_id.as_str(), "r-0001");
+    assert_eq!(
+        store
+            .claim_next_run("worker-a", NOW, LEASE_MS)
+            .expect("claim"),
+        None
+    );
 }
 
 #[test]

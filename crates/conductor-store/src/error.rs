@@ -75,6 +75,27 @@ pub enum StoreError {
         source: rusqlite::Error,
     },
 
+    /// The write carried a fencing epoch that is no longer current (§4.7).
+    ///
+    /// This is the rejection acceptance row 27 requires: a worker that stalled
+    /// past its lease and woke up cannot write over its successor's work. A
+    /// missing run reports `actual: None` — writing to a run that is not there
+    /// is fenced out too.
+    #[error("fenced out: write carried lease_epoch {expected}, run holds {actual:?}")]
+    FencedOut {
+        /// The epoch the caller believed it held.
+        expected: i64,
+        /// The epoch the database actually holds, or `None` if the run is gone.
+        actual: Option<i64>,
+    },
+
+    /// A reconciled route was attempted on a run that is not in `RECONCILING`.
+    ///
+    /// §5.2: "`RECONCILING` is mandatory and unskippable." The type system stops
+    /// a caller naming `COMPLETE`; this stops one skipping the state entirely.
+    #[error("run {0} is not in RECONCILING, so it cannot be routed onwards")]
+    NotReconciling(String),
+
     /// A `TEXT` column held a value the domain does not recognise.
     #[error("invalid domain value read from the store: {0}")]
     Domain(String),

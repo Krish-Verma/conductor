@@ -19,6 +19,7 @@ pub use baseline::{
 pub use clone::{Workspace, WorkspaceRequest, assert_registrable, create_workspace};
 pub use descriptor::{DESCRIPTOR_FILENAME, RunDescriptor, read_descriptor};
 pub use error::{GitError, GitResult};
+pub use git::{GitOutput, run_git, run_git_ok};
 pub use quarantine::{Orphan, OrphanReason, Quarantined, find_orphans, quarantine};
 pub use reconcile::{
     AgentReport, Finding, FindingKind, Reconciliation, ReportClaim, Scope, SensitivePatterns,

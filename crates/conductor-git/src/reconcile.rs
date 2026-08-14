@@ -43,6 +43,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::baseline::{Baseline, Observed};
 
+// `AgentReport` moved to `conductor-core` at S3: the adapter layer produces it
+// and reconciliation consumes it, so it belongs in the crate both depend on
+// rather than in the one that happens to have needed it first. Re-exported so
+// that `conductor_git::AgentReport` keeps meaning what it did.
+pub use conductor_core::{AgentReport, ReportClaim};
+
 /// The seven §4.8 verdicts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -169,27 +175,6 @@ pub struct Finding {
     pub detail: String,
     /// The path, refname or config key involved.
     pub path: Option<String>,
-}
-
-/// What an agent said it did. Evidence only — never authority.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentReport {
-    /// The agent's own claim about the attempt.
-    pub claim: ReportClaim,
-    /// Paths the agent says it modified.
-    pub files_touched: Vec<String>,
-}
-
-/// An agent's claim about its attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum ReportClaim {
-    /// The agent says the task is done.
-    Complete,
-    /// The agent says it made partial progress.
-    Partial,
-    /// The agent says it failed.
-    Failed,
 }
 
 /// A verification result, per the §4.5 outcome set.

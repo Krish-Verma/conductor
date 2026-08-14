@@ -1,9 +1,8 @@
 //! The append-only evidence log's typed surface.
 //!
 //! `event` is evidence, not event sourcing (Part 5.1): state is never replayed
-//! from it. S1 emits exactly one kind — `RUN_CLAIMED`, written inside the claim
-//! transaction — so exactly one kind is defined here. Kinds are added by the
-//! slice that emits them.
+//! from it. Kinds are added by the slice that emits them: S1 added
+//! `RUN_CLAIMED`, S3 adds the supervision and recovery kinds.
 
 use std::fmt;
 use std::str::FromStr;
@@ -19,16 +18,66 @@ use crate::state::ParseStateError;
 pub enum EventKind {
     /// A worker took ownership of a run (§4.7).
     RunClaimed,
+    /// A lease lapsed and the run was forced to `RECONCILING` (§5.2 restart).
+    LeaseExpired,
+    /// The lease was extended by its owner, the child having been observed alive.
+    LeaseRenewed,
+    /// An attempt row was opened.
+    AttemptCreated,
+    /// A process was spawned and its identity recorded.
+    AttemptStarted,
+    /// An attempt reached a terminal outcome.
+    AttemptFinished,
+    /// Conductor looked at the repository and classified the attempt (§4.8).
+    AttemptReconciled,
+    /// A run moved state.
+    RunStateChanged,
+    /// A side effect was declared before being performed (§4.7).
+    EffectIntended,
+    /// A side effect's receipt was recorded.
+    EffectConfirmed,
+    /// A side effect's precondition could not be decided. The run halts.
+    EffectAmbiguous,
+    /// Startup recovery adopted, staled or blocked a run.
+    RecoveryDecision,
+    /// A finding was raised. Findings never auto-resolve (§4.8).
+    FindingRaised,
 }
 
 impl EventKind {
     /// Every variant, in declaration order.
-    pub const ALL: &'static [EventKind] = &[EventKind::RunClaimed];
+    pub const ALL: &'static [EventKind] = &[
+        EventKind::RunClaimed,
+        EventKind::LeaseExpired,
+        EventKind::LeaseRenewed,
+        EventKind::AttemptCreated,
+        EventKind::AttemptStarted,
+        EventKind::AttemptFinished,
+        EventKind::AttemptReconciled,
+        EventKind::RunStateChanged,
+        EventKind::EffectIntended,
+        EventKind::EffectConfirmed,
+        EventKind::EffectAmbiguous,
+        EventKind::RecoveryDecision,
+        EventKind::FindingRaised,
+    ];
 
     /// The exact string persisted in the database.
     pub fn as_str(&self) -> &'static str {
         match self {
             EventKind::RunClaimed => "RUN_CLAIMED",
+            EventKind::LeaseExpired => "LEASE_EXPIRED",
+            EventKind::LeaseRenewed => "LEASE_RENEWED",
+            EventKind::AttemptCreated => "ATTEMPT_CREATED",
+            EventKind::AttemptStarted => "ATTEMPT_STARTED",
+            EventKind::AttemptFinished => "ATTEMPT_FINISHED",
+            EventKind::AttemptReconciled => "ATTEMPT_RECONCILED",
+            EventKind::RunStateChanged => "RUN_STATE_CHANGED",
+            EventKind::EffectIntended => "EFFECT_INTENDED",
+            EventKind::EffectConfirmed => "EFFECT_CONFIRMED",
+            EventKind::EffectAmbiguous => "EFFECT_AMBIGUOUS",
+            EventKind::RecoveryDecision => "RECOVERY_DECISION",
+            EventKind::FindingRaised => "FINDING_RAISED",
         }
     }
 }
@@ -43,13 +92,14 @@ impl FromStr for EventKind {
     type Err = ParseStateError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "RUN_CLAIMED" => Ok(EventKind::RunClaimed),
-            other => Err(ParseStateError {
+        EventKind::ALL
+            .iter()
+            .copied()
+            .find(|k| k.as_str() == s)
+            .ok_or_else(|| ParseStateError {
                 type_name: "EventKind",
-                value: other.to_string(),
-            }),
-        }
+                value: s.to_string(),
+            })
     }
 }
 
@@ -86,6 +136,17 @@ mod tests {
             serde_json::to_string(&EventKind::RunClaimed).expect("serialize"),
             "\"RUN_CLAIMED\""
         );
+    }
+
+    #[test]
+    fn every_kind_round_trips_and_serde_agrees_with_the_column() {
+        for kind in EventKind::ALL {
+            assert_eq!(&kind.as_str().parse::<EventKind>().expect("parse"), kind);
+            assert_eq!(
+                serde_json::to_string(kind).expect("serialize"),
+                format!("\"{}\"", kind.as_str())
+            );
+        }
     }
 
     #[test]

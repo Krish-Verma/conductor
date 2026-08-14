@@ -1,4 +1,11 @@
-//! Shared test setup for the containment harness.
+//! Shared test setup for `conductor-run`'s tests.
+//!
+//! One copy is compiled into every test binary in the crate, and each binary
+//! uses a subset — the containment helpers below are for `host_probe.rs` and
+//! `failure_injection.rs`, the supervision helpers in `agent` are for the rest.
+#![allow(dead_code)]
+
+pub mod agent;
 
 use std::path::PathBuf;
 use std::time::Duration;

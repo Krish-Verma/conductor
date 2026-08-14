@@ -7,6 +7,10 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+# Master plan §2.3 lists blake3 among conductor-core's three dependencies, and
+# §4.7 specifies operation_id = blake3(kind ‖ run ‖ ordinal ‖ tree_hash) by name.
+# S3 is the slice that first needs it, so it is added here rather than earlier.
+blake3 = "1.8.6"
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.20"
 

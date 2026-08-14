@@ -93,6 +93,7 @@ fn in_scope_changes_with_a_consistent_report_are_clean_complete() {
     let report = AgentReport {
         claim: ReportClaim::Complete,
         files_touched: vec!["src/lib.rs".to_string()],
+        summary: String::new(),
     };
     let result = reconcile(
         &run.ws.baseline,
@@ -291,6 +292,7 @@ fn a_report_claiming_success_over_an_untouched_tree_is_contradicted() {
     let report = AgentReport {
         claim: ReportClaim::Complete,
         files_touched: Vec::new(),
+        summary: String::new(),
     };
 
     let result = reconcile(
@@ -321,6 +323,7 @@ fn a_report_naming_a_file_git_never_saw_change_is_contradicted() {
     let report = AgentReport {
         claim: ReportClaim::Complete,
         files_touched: vec!["src/lib.rs".to_string(), "src/ghost.rs".to_string()],
+        summary: String::new(),
     };
 
     let result = reconcile(
@@ -356,6 +359,7 @@ fn an_observed_change_the_report_does_not_mention_raises_a_finding_without_chang
     let report = AgentReport {
         claim: ReportClaim::Complete,
         files_touched: vec!["src/lib.rs".to_string()],
+        summary: String::new(),
     };
 
     let result = reconcile(

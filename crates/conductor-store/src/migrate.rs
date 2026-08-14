@@ -27,11 +27,18 @@ pub struct Migration {
 }
 
 /// Every migration known to this binary, in ascending version order.
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "schema_v1",
-    sql: schema::SCHEMA_V1,
-}];
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "schema_v1",
+        sql: schema::SCHEMA_V1,
+    },
+    Migration {
+        version: 2,
+        name: "attempt_state",
+        sql: schema::SCHEMA_V2,
+    },
+];
 
 /// What [`migrate`] did about one migration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -81,11 +88,21 @@ pub fn pending(conn: &Connection) -> StoreResult<Vec<&'static Migration>> {
 /// Apply every pending migration in order. Returns one step per known
 /// migration, applied or skipped.
 pub fn migrate(conn: &mut Connection) -> StoreResult<Vec<MigrationStep>> {
+    apply_up_to(conn, i64::MAX)
+}
+
+/// Apply pending migrations up to and including `max_version`.
+///
+/// Exists so that a test can build a database at an *older* schema and then
+/// migrate it forward — the only way to check that a forward migration actually
+/// works on data written before it, rather than only on a database that was
+/// created with the migration already applied.
+pub fn apply_up_to(conn: &mut Connection, max_version: i64) -> StoreResult<Vec<MigrationStep>> {
     let current = current_version(conn)?;
     reject_future_schema(current)?;
 
     let mut steps = Vec::with_capacity(MIGRATIONS.len());
-    for migration in MIGRATIONS {
+    for migration in MIGRATIONS.iter().filter(|m| m.version <= max_version) {
         if Some(migration.version) <= current {
             steps.push(MigrationStep {
                 version: migration.version,

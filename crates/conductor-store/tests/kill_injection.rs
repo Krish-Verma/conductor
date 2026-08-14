@@ -38,7 +38,10 @@ fn sigkill_mid_transaction_never_leaves_partial_rows_or_corruption() {
         common::seed_parents(&mut store).expect("seed parents");
         table_counts(&store)
     };
-    assert_eq!(baseline, (0, 0, 0, 1));
+    assert_eq!(
+        baseline,
+        (0, 0, 0, conductor_store::migrate::MIGRATIONS.len() as i64)
+    );
 
     for cycle in 0..CYCLES {
         let marker = format!("victim-{cycle}");
@@ -116,7 +119,10 @@ fn sigkill_mid_transaction_never_leaves_partial_rows_or_corruption() {
             0,
             "cycle {cycle}: uncommitted event rows survived"
         );
-        assert_eq!(store.schema_version().expect("version"), Some(1));
+        assert_eq!(
+            store.schema_version().expect("version"),
+            Some(conductor_store::schema::SUPPORTED_SCHEMA_VERSION)
+        );
     }
 
     // The store must still be usable after 100 crashes, not merely intact.

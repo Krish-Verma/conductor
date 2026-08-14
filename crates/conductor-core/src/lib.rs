@@ -9,14 +9,24 @@
 //! the one event kind S1 emits. State-transition validation, decision functions
 //! and reconciliation belong to S3/S5 and are deliberately absent.
 
+pub mod attempt;
 pub mod containment;
+pub mod effect;
 pub mod event;
+pub mod fence;
 pub mod ids;
+pub mod report;
 pub mod state;
 
+pub use attempt::{Attempt, AttemptState, TerminalAttempt};
 pub use containment::{Enforcement, ExecutionCapabilities, GatingDimension, Informational};
+pub use effect::{OperationId, Precondition, SideEffectKind, SideEffectState};
 pub use event::{EventKind, RunClaimedPayload};
+pub use fence::Fence;
 pub use ids::{
     AttemptId, IdError, PlanVersionId, PolicyHash, ProjectId, RunId, TaskId, WorkspaceId,
 };
-pub use state::{AttemptOutcome, ParseStateError, PlanVersionState, RunState, TaskState};
+pub use report::{AgentReport, ReportClaim};
+pub use state::{
+    AttemptOutcome, ParseStateError, PlanVersionState, ReconciledRoute, RunState, TaskState,
+};

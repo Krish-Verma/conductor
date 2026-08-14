@@ -710,19 +710,21 @@ INSERT INTO event(run_id, seq, kind, payload) VALUES (…, 'RUN_CLAIMED', …);
 COMMIT;
 ```
 
-> **Contradiction, owned by S3 (surfaced at S1).** The predicate selects
-> `state IN ('READY','RECOVERING')`, but `RECOVERING` **is not one of the twelve task
-> states in §5.2**, and the run state "mirrors its task". Half the claim's own
-> predicate can therefore never match. §5.2's restart rule forces crashed runs to
-> `RECONCILING`, not `RECOVERING`, so the intended reclaim predicate is most likely
-> `state IN ('READY','RECONCILING')` — a `RECONCILING` run whose lease has expired is
-> exactly what a restarting worker must be able to take, and the existing
+> **RESOLVED at S3** (contradiction surfaced at S1). `RECOVERING` was never a state:
+> §5.2's task machine does not define it, and the run state mirrors its task, so half
+> the claim's predicate could never match — a dead disjunct in a safety predicate reads
+> as coverage without being it. The `RunState::Recovering` variant is **deleted** and
+> the predicate is now `state IN ('READY','RECONCILING')`: a `RECONCILING` run whose
+> lease has expired is exactly what a restarting worker must take, and the existing
 > `lease_expires_at` clause already protects a live worker's run.
 >
-> **S1 shipped the statement verbatim rather than guessing**, because the reclaim path
-> is S3's design surface and the S1 measurement had to measure the statement as
-> specified. This is safe today only because nothing writes `RECOVERING`, so the dead
-> disjunct matches no row. **S3 must resolve it and re-verify the claim measurement.**
+> The claim additionally **preserves** `RECONCILING` rather than overwriting it with
+> `RUNNING`, because §5.2 has no `RECONCILING → RUNNING` edge:
+> `SET state = CASE WHEN state='RECONCILING' THEN 'RECONCILING' ELSE 'RUNNING' END`.
+>
+> **Re-measured after the change** (ADR-0005's evidence is tied to this statement):
+> 39,400 claims, **0 duplicates, 0 invariant failures**; worst-case claim latency
+> 5147 ms → **4950 ms**. The 60 s lease keeps its ~12× margin; M26 stands.
 
 **`lease_epoch` is the fencing token.** Every subsequent write by that worker carries its epoch and is rejected if the epoch moved. Without fencing, a process that stalls past its lease and then wakes will happily write over its successor's work.
 
@@ -1092,13 +1094,14 @@ CREATED → STARTING → ACTIVE ─┬─► EXITED     ─┐
 
 `STALE` ≠ `CRASHED`. `CRASHED` means we observed a nonzero exit; `STALE` means **we do not know**, and unknown must not be recorded as known. Every path ends at `RECONCILED` — an attempt is never finished until Conductor has looked at the repository.
 
-> **Open, owned by S3 (surfaced at S1).** The `attempt` table (Part 5.1) has **no
-> `state` column** — only `outcome`, whose five values cover `EXITED|CRASHED|TIMED_OUT|
-> STALE|RECONCILED`. `CREATED`, `STARTING` and `ACTIVE` are therefore not persistable,
-> so a supervisor cannot currently record that an attempt is in flight — which is
-> exactly what startup recovery must read. S3 owns the fix (a forward migration adding
-> `attempt.state`); S1 deliberately did not pre-empt it, because S3 knows what the
-> supervisor actually needs.
+> **RESOLVED at S3** (surfaced at S1). `attempt` had **no `state` column** — only
+> `outcome` — so `CREATED`, `STARTING` and `ACTIVE` were unpersistable and a supervisor
+> could not record that an attempt was in flight, which is exactly what startup recovery
+> must read. **Schema v2** (forward migration; v1 untouched) adds
+> `attempt.state TEXT NOT NULL DEFAULT 'CREATED'` plus a partial index on the in-flight
+> set. The default is deliberately `CREATED`: a pre-existing row then reads as *in
+> flight*, so recovery goes and looks at the world rather than assuming the attempt
+> finished — failing in the safe direction.
 
 ### Approval (5 states)
 
@@ -1460,7 +1463,28 @@ out-of-band by ADR-0003).
 
 ---
 
-### S3 — Fake agent, supervision, crash recovery *(merged)*
+### S3 — Fake agent, supervision, crash recovery *(merged)*  ✅ **COMPLETE 2026-08-13**
+
+**Outcome.** `conductor-agent` (AgentAdapter + scenario-driven FakeAgent), supervisor
+(std threads, **no `tokio`**), leases + `lease_epoch` fencing + liveness-conditional
+heartbeat, persisted attempt machine (schema v2), startup recovery, side-effect ledger,
+unique artifact-path ownership. 143 new tests (**341 total**, 3m24s). Both S1-surfaced
+contradictions resolved (§4.7, §5.2 above). `RUNNING → COMPLETE` is now **unrepresentable**:
+`leave_running()` requires a `TerminalAttempt` token and returns one destination, and
+`ReconciledRoute` has no `Complete` variant at all until S4 supplies verification.
+Report: `docs/reports/S3-completion-report.md`.
+
+**Two findings that change how later slices must test:**
+- **The 12 prescribed Conductor kill points were insufficient.** There was no point
+  between `git clone` returning and the workspace being recorded, and that gap held a
+  real bug that **stranded a run permanently**. Verified by experiment that the matrix
+  as written did *not* catch it. A 13th point was added. **`assert_converged` is
+  necessary but not sufficient** — carry this to S6.
+- **A test can race its own timer.** The agent-kill matrix asserted `CRASHED` under a
+  tight idle budget; under load the idle timer fired first and the supervisor correctly
+  recorded `TIMED_OUT` (§6.4 makes a timeout outrank the signal used to enforce it). The
+  product was right and the test was wrong. Budgets are now separated by what the test
+  is actually asserting.
 
 **Objective.** Spawn/supervise/classify a subprocess; recover every failure mode from evidence alone.
 **Why now.** Conductor's spine. Real agents add nothing testable that a fake one does not.
