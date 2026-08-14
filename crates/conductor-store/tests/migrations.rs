@@ -125,6 +125,12 @@ fn the_run_table_has_exactly_the_columns_the_claim_depends_on() {
             "lease_expires_at",
             "lease_epoch",
             "created_at",
+            // Schema v4 (S5). §4.1's "if the target ref moved, the run enters
+            // AWAITING_REVIEW with the divergence attached" needs to know which
+            // ref; `base_commit` only says what it pointed at. Appended, because
+            // `ALTER TABLE … ADD COLUMN` puts it last and this list is in `cid`
+            // order — which is the point of asserting the order at all.
+            "target_branch",
         ]
     );
 }

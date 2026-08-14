@@ -33,10 +33,16 @@ pub struct RunRow {
     pub lease_epoch: i64,
     /// The workspace, when one has been recorded.
     pub workspace_path: Option<String>,
+    /// The branch this run integrates into (§4.1's "target ref"), when one was
+    /// recorded. `None` for rows written before schema v4 — and a run with no
+    /// recorded target is refused at integration rather than integrated into a
+    /// branch nobody chose.
+    pub target_branch: Option<String>,
 }
 
 const RUN_COLUMNS: &str = "run.id, run.task_id, run.state, run.base_commit, run.run_branch, \
-                           run.lease_owner, run.lease_expires_at, run.lease_epoch, workspace.path";
+                           run.lease_owner, run.lease_expires_at, run.lease_epoch, workspace.path, \
+                           run.target_branch";
 
 fn to_run_row(row: &rusqlite::Row<'_>) -> StoreResult<RunRow> {
     let state: String = row.get(2)?;
@@ -50,6 +56,7 @@ fn to_run_row(row: &rusqlite::Row<'_>) -> StoreResult<RunRow> {
         lease_expires_at: row.get(6)?,
         lease_epoch: row.get(7)?,
         workspace_path: row.get(8)?,
+        target_branch: row.get(9)?,
     })
 }
 
@@ -84,6 +91,34 @@ pub fn runs_in_states(conn: &Connection, states: &[RunState]) -> StoreResult<Vec
         out.push(to_run_row(row)?);
     }
     Ok(out)
+}
+
+/// The one non-terminal run of a task, if it has one.
+///
+/// "The one" is guaranteed by `ix_run_one_active_per_task`, the unique partial
+/// index over `run(task_id) WHERE state NOT IN ('COMPLETE','CANCELLED',
+/// 'SUPERSEDED')`. A restart needs this because it knows which *task* it is
+/// resuming and the run id is an implementation detail of the task (§7.1: "a run
+/// is an implementation detail of a task").
+pub fn active_run_for_task(conn: &Connection, task_id: &str) -> StoreResult<Option<RunId>> {
+    let terminal: Vec<&str> = RunState::ALL
+        .iter()
+        .filter(|s| s.is_terminal())
+        .map(|s| s.as_str())
+        .collect();
+    let placeholders = terminal.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql =
+        format!("SELECT id FROM run WHERE task_id = ?1 AND state NOT IN ({placeholders}) LIMIT 1");
+    let mut stmt = conn.prepare(&sql)?;
+    let mut params: Vec<&dyn rusqlite::ToSql> = vec![&task_id];
+    for state in &terminal {
+        params.push(state as &dyn rusqlite::ToSql);
+    }
+    let mut rows = stmt.query(params.as_slice())?;
+    match rows.next()? {
+        Some(row) => Ok(Some(RunId::new(row.get::<_, String>(0)?)?)),
+        None => Ok(None),
+    }
 }
 
 /// Every run that is not in a terminal state.

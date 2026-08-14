@@ -161,6 +161,48 @@ impl VerificationReport {
             .collect()
     }
 
+    /// `blake3` over the evidence the completion gate reads — §3.4's
+    /// `Conductor-Verification` trailer.
+    ///
+    /// §3.4 gives the trailer a value and does not say what it digests. This is
+    /// the only reading that makes the trailer do its stated job: §3.5 says a
+    /// reader recovering from total local loss must be able to reconstruct
+    /// "which run, plan version, policy snapshot and approval produced every
+    /// Conductor-authored commit", and a digest is only evidence if a reader
+    /// with the artifacts can **recompute** it. So it covers exactly the fields
+    /// §4.5 binds a result to — `(check_id, outcome, tree_hash, command_hash)`
+    /// plus the toolchain fingerprint — and nothing that varies between runs of
+    /// the same checks on the same tree (durations, log paths, wall times).
+    ///
+    /// Sorted, so the digest does not depend on the order the schedule happened
+    /// to run in; field-separated by a byte that cannot occur in any component,
+    /// for the reason [`conductor_core::effect::OperationId::compute`] gives.
+    pub fn evidence_digest(&self) -> String {
+        const SEP: u8 = 0x1f;
+        let mut rows: Vec<String> = self
+            .results
+            .iter()
+            .map(|r| {
+                format!(
+                    "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+                    r.check_id,
+                    r.outcome.as_str(),
+                    r.tree_hash,
+                    r.command_hash
+                )
+            })
+            .collect();
+        rows.sort();
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(self.toolchain_fingerprint.as_bytes());
+        for row in &rows {
+            hasher.update(&[SEP]);
+            hasher.update(row.as_bytes());
+        }
+        format!("blake3:{}", hasher.finalize().to_hex())
+    }
+
     /// One group of results, in the shape §4.5's completion gate reads.
     ///
     /// The mapping lives here, tested, rather than in whichever slice first

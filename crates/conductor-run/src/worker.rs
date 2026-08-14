@@ -180,6 +180,10 @@ pub struct AttemptOutcomeRecord {
     pub route: ReconciledRoute,
     /// Findings raised during this attempt.
     pub findings: Vec<String>,
+    /// The paths reconciliation observed as changed (§4.8's reconciled
+    /// surface). §4.5's conditional checks are triggered by "the actual diff",
+    /// and this is that diff — read from the repository, never from the report.
+    pub changed_paths: Vec<String>,
 }
 
 /// Anything running an attempt can fail with.
@@ -452,6 +456,7 @@ pub fn run_one_attempt(
         verdict: reconciliation.verdict,
         route,
         findings,
+        changed_paths: reconciliation.changed_paths.clone(),
     })
 }
 
@@ -664,26 +669,18 @@ fn persist_baseline(
 }
 
 /// Ask the world whether the effect already happened — §4.7.
+///
+/// The two-valued view of [`crate::effects::check_precondition`], kept because
+/// most callers only need "may I skip this?" — and answering `false` for an
+/// indeterminate world is the safe direction *for that question*, since the
+/// caller then goes and looks rather than assuming. Anything that must
+/// distinguish "no" from "cannot tell" — recovery does — takes the three-valued
+/// answer instead.
 pub fn precondition_holds(precondition: &Precondition) -> bool {
-    match precondition {
-        Precondition::FileWithHash {
-            path,
-            content_hash: expected,
-        } => match std::fs::read(path) {
-            Ok(bytes) => &content_hash(&bytes) == expected,
-            Err(_) => false,
-        },
-        Precondition::WorkspaceAtHead { path, head } => {
-            let workspace = std::path::Path::new(path);
-            if !workspace.exists() {
-                return false;
-            }
-            match conductor_git::run_git(workspace, &["rev-parse", "HEAD"]) {
-                Ok(output) if output.ok() => output.stdout_trimmed() == *head,
-                _ => false,
-            }
-        }
-    }
+    matches!(
+        crate::effects::check_precondition(precondition),
+        crate::effects::PreconditionAnswer::Held
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -737,6 +734,7 @@ fn finish_without_agent(
         verdict: reconciliation.verdict,
         route,
         findings,
+        changed_paths: reconciliation.changed_paths.clone(),
     })
 }
 

@@ -13,9 +13,18 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive"] }
+# `task run` builds an adapter and reads the repository, so the CLI now depends
+# on the two crates that own those. Workspace members, not new third-party
+# packages — nothing new enters the lock.
+conductor-agent.workspace = true
 conductor-core.workspace = true
+conductor-git.workspace = true
 conductor-run.workspace = true
 conductor-store.workspace = true
+# The store hands out `rusqlite::Connection`, and `task show` reads two tables
+# S5 has no typed accessor for. Same version as conductor-store, so cargo
+# unifies it.
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 

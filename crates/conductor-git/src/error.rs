@@ -65,6 +65,17 @@ pub enum GitError {
         reason: String,
     },
 
+    /// Git ran and succeeded, but what it reported cannot mean what the caller
+    /// needs it to mean.
+    ///
+    /// Distinct from [`GitError::Command`], which is git saying no. This is
+    /// Conductor refusing to proceed on an answer it cannot interpret — a
+    /// workspace on the wrong branch, a target ref that does not exist, a
+    /// `diff --quiet` that returned neither 0 nor 1. §4.7's rule for an
+    /// indeterminate world is to stop, never to guess.
+    #[error("{0}")]
+    Domain(String),
+
     /// JSON serialisation failed.
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),

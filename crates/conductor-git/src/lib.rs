@@ -9,6 +9,7 @@ pub mod clone;
 pub mod descriptor;
 pub mod error;
 pub mod git;
+pub mod integrate;
 pub mod quarantine;
 pub mod reconcile;
 pub mod tree;
@@ -21,6 +22,11 @@ pub use clone::{Workspace, WorkspaceRequest, assert_registrable, create_workspac
 pub use descriptor::{DESCRIPTOR_FILENAME, RunDescriptor, read_descriptor};
 pub use error::{GitError, GitResult};
 pub use git::{GitOutput, run_git, run_git_ok};
+pub use integrate::{
+    Divergence, FetchedRef, MadeCommit, StagedTree, Trailer, Trailers, commit_exists,
+    commit_staged, commit_workspace, fetch_run_branch, find_commit, ref_sha, stage_all,
+    target_divergence,
+};
 pub use quarantine::{Orphan, OrphanReason, Quarantined, find_orphans, quarantine};
 pub use reconcile::{
     AgentReport, Finding, FindingKind, Reconciliation, ReportClaim, Scope, SensitivePatterns,

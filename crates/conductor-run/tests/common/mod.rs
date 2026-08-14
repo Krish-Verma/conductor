@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 pub mod agent;
+pub mod vertical;
 
 use std::path::PathBuf;
 use std::time::Duration;

@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::error::{StoreError, StoreResult};
 
 /// The highest schema version this binary understands.
-pub const SUPPORTED_SCHEMA_VERSION: i64 = 3;
+pub const SUPPORTED_SCHEMA_VERSION: i64 = 4;
 
 /// Pragmas as they are *set*, in application order.
 ///
@@ -317,4 +317,21 @@ CREATE INDEX ix_attempt_in_flight ON attempt(state)
 /// wording. Renamed instead (ADR-0007). Nothing had written the table yet.
 pub const SCHEMA_V3: &str = r#"
 ALTER TABLE artifact RENAME COLUMN sha256 TO content_hash;
+"#;
+
+/// Schema v4 — the ref a run integrates into.
+///
+/// §4.1 requires that "at integration, if the target ref moved, the run enters
+/// `AWAITING_REVIEW` with the divergence attached" (acceptance row 16). Deciding
+/// that takes two facts: **which** ref, and what it pointed at when the run
+/// started. Part 5.1's `run` table has the second — `base_commit` — and had no
+/// place at all for the first, so the question could not be asked. `run_branch`
+/// is not it: that is the branch the *agent's* work lives on inside the clone.
+///
+/// Nullable, because rows written before v4 genuinely do not know their target
+/// and inventing `'main'` for them would be exactly the guess §4.7 forbids
+/// elsewhere. A run with no recorded target is refused at integration rather
+/// than integrated into a branch nobody chose.
+pub const SCHEMA_V4: &str = r#"
+ALTER TABLE run ADD COLUMN target_branch TEXT;
 "#;

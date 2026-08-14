@@ -89,12 +89,26 @@ pub enum StoreError {
         actual: Option<i64>,
     },
 
-    /// A reconciled route was attempted on a run that is not in `RECONCILING`.
+    /// A run was routed onwards from a state it is not in.
     ///
-    /// §5.2: "`RECONCILING` is mandatory and unskippable." The type system stops
-    /// a caller naming `COMPLETE`; this stops one skipping the state entirely.
-    #[error("run {0} is not in RECONCILING, so it cannot be routed onwards")]
-    NotReconciling(String),
+    /// §5.2: "`RECONCILING` is mandatory and unskippable", and `COMPLETE` sits
+    /// downstream of `VERIFYING`. The type system stops a caller *naming*
+    /// `COMPLETE` without evidence; this stops one skipping a state entirely.
+    #[error("run {run_id} is not in {required}, so it cannot be routed onwards")]
+    NotInState {
+        /// The run.
+        run_id: String,
+        /// The state the transition required it to be in.
+        required: conductor_core::RunState,
+    },
+
+    /// A task-state write §5.2's machine does not draw.
+    ///
+    /// The counterpart to [`StoreError::NotReconciling`] for the `task` row:
+    /// S3's type-level guarantee covers `run.state`, and `task.state` is a
+    /// second column that can carry the same claim.
+    #[error("illegal task transition: {0}")]
+    IllegalTaskTransition(String),
 
     /// A `TEXT` column held a value the domain does not recognise.
     #[error("invalid domain value read from the store: {0}")]

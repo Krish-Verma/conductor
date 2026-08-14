@@ -35,9 +35,10 @@ use conductor_git::{Baseline, Quarantined, find_orphans, observe, quarantine};
 use conductor_store::{ExpiredLease, Store};
 use serde::Serialize;
 
+use crate::effects::{PreconditionAnswer, check_precondition};
 use crate::paths::ArtifactRoot;
 use crate::supervise::{Liveness, probe};
-use crate::worker::{WorkerError, precondition_holds, route_for};
+use crate::worker::{WorkerError, route_for};
 
 /// What recovery is allowed to do.
 #[derive(Debug, Clone)]
@@ -226,13 +227,27 @@ pub fn recover(
     })
 }
 
-fn recover_one(
+/// Steps 3–7 for **one** run the caller already owns.
+///
+/// Public because the S5 vertical resumes a crashed run through exactly this
+/// path and then keeps going. A restarting foreground worker (§2.4: "Foreground
+/// supervisor for S1–S13" — there is no daemon until S14) has to recover *and*
+/// continue in the same process, and it must not hand the lease back in between:
+/// a run routed to `VERIFYING` is not claimable — §4.7's claim predicate is
+/// `READY`/`RECONCILING`, and deliberately so, since the lease sweep already
+/// forces `VERIFYING` to `RECONCILING` — so a released lease at that moment
+/// would strand the run. Sharing this function is also what keeps a restart and
+/// a recovery pass from drifting into two different notions of "recovered".
+///
+/// Returns the reconciliation when the run got as far as one, so the caller does
+/// not have to observe the repository a second time to learn what it said.
+pub fn recover_one(
     store: &mut Store,
     fence: &Fence,
     config: &RecoveryConfig,
     now_ms: i64,
     decisions: &mut Vec<RecoveryDecision>,
-) -> Result<(), WorkerError> {
+) -> Result<Option<conductor_git::Reconciliation>, WorkerError> {
     let run_id = fence.run_id().clone();
 
     // Step 3. Probe every in-flight attempt of this run.
@@ -256,7 +271,7 @@ fn recover_one(
                     // An adopted agent is still running, so its attempt stays in
                     // flight and the run stays where it is. Nothing further to
                     // classify this pass.
-                    return Ok(());
+                    return Ok(None);
                 }
                 Liveness::Alive(_) => {
                     // Terminate: nobody is reading its output or enforcing its
@@ -369,7 +384,7 @@ fn recover_one(
                     route: ReconciledRoute::Repairing,
                     verification_needed: false,
                 });
-                return Ok(());
+                return Ok(None);
             }
         },
     };
@@ -390,7 +405,7 @@ fn recover_one(
             run_id,
             expected: workspace_path.display().to_string(),
         });
-        return Ok(());
+        return Ok(None);
     }
 
     // Step 5. Diff the repository against the stored baseline.
@@ -413,7 +428,7 @@ fn recover_one(
             route: ReconciledRoute::Blocked,
             verification_needed: false,
         });
-        return Ok(());
+        return Ok(None);
     };
 
     let observed = observe(&workspace_path, &baseline)?;
@@ -460,7 +475,7 @@ fn recover_one(
         route,
         verification_needed,
     });
-    Ok(())
+    Ok(Some(reconciliation))
 }
 
 /// Attach a workspace that exists on disk but was never recorded.
@@ -565,55 +580,54 @@ fn resolve_effects(
         .collect();
 
     for row in unresolved {
-        if precondition_holds(&row.precondition) {
-            // It happened. Record the receipt and do **not** do it again.
-            store.confirm_effect(
-                fence,
-                &row.operation_id,
-                "{\"resolved_by\":\"recovery\",\"precondition\":\"held\"}",
-                now_ms,
-            )?;
-            decisions.push(RecoveryDecision::EffectConfirmed {
-                operation_id: row.operation_id.to_string(),
-            });
-            continue;
+        // §4.7's three answers, from the world. Until S5 this was a `bool` plus
+        // a heuristic — "the target path exists but does not match ⇒
+        // `AMBIGUOUS`" — which is right for a file and wrong for a commit: a
+        // workspace directory exists whether or not the commit inside it was
+        // made, so a run that crashed *before* committing would have been
+        // declared ambiguous and stopped for a human. Each precondition now says
+        // for itself which observations are decisive.
+        match check_precondition(&row.precondition) {
+            PreconditionAnswer::Held => {
+                // It happened. Record the receipt and do **not** do it again.
+                store.confirm_effect(
+                    fence,
+                    &row.operation_id,
+                    "{\"resolved_by\":\"recovery\",\"precondition\":\"held\"}",
+                    now_ms,
+                )?;
+                decisions.push(RecoveryDecision::EffectConfirmed {
+                    operation_id: row.operation_id.to_string(),
+                });
+            }
+            PreconditionAnswer::NotHeld => {
+                store.fail_effect(
+                    fence,
+                    &row.operation_id,
+                    "{\"resolved_by\":\"recovery\",\"precondition\":\"absent\"}",
+                    now_ms,
+                )?;
+                decisions.push(RecoveryDecision::EffectNotDone {
+                    operation_id: row.operation_id.to_string(),
+                });
+            }
+            PreconditionAnswer::Indeterminate(why) => {
+                let detail = format!("{why} ({})", row.kind.did_it_happen_question());
+                store.mark_effect_ambiguous(fence, &row.operation_id, &detail, now_ms)?;
+                store.record_finding(
+                    fence,
+                    &format!("f-{}-EFFECT_AMBIGUOUS", fence.run_id().as_str()),
+                    "EFFECT_AMBIGUOUS",
+                    "CRITICAL",
+                    &detail,
+                    now_ms,
+                )?;
+                decisions.push(RecoveryDecision::EffectAmbiguous {
+                    operation_id: row.operation_id.to_string(),
+                    detail,
+                });
+            }
         }
-
-        // The precondition does not hold. That is only decisive when the target
-        // is absent: a target that exists but does not match means somebody
-        // wrote something Conductor cannot account for, and §4.7 says halt.
-        let path = std::path::Path::new(row.precondition.path());
-        if path.exists() {
-            let detail = format!(
-                "{} exists but does not satisfy the recorded precondition ({})",
-                path.display(),
-                row.kind.did_it_happen_question()
-            );
-            store.mark_effect_ambiguous(fence, &row.operation_id, &detail, now_ms)?;
-            store.record_finding(
-                fence,
-                &format!("f-{}-EFFECT_AMBIGUOUS", fence.run_id().as_str()),
-                "EFFECT_AMBIGUOUS",
-                "CRITICAL",
-                &detail,
-                now_ms,
-            )?;
-            decisions.push(RecoveryDecision::EffectAmbiguous {
-                operation_id: row.operation_id.to_string(),
-                detail,
-            });
-            continue;
-        }
-
-        store.fail_effect(
-            fence,
-            &row.operation_id,
-            "{\"resolved_by\":\"recovery\",\"precondition\":\"absent\"}",
-            now_ms,
-        )?;
-        decisions.push(RecoveryDecision::EffectNotDone {
-            operation_id: row.operation_id.to_string(),
-        });
     }
     Ok(())
 }

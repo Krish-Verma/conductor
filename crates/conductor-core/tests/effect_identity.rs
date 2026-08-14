@@ -94,3 +94,77 @@ fn every_side_effect_kind_names_a_checkable_precondition() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// S5's two Conductor-owned git effects.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_two_git_effects_of_section_4_7_exist_and_ask_the_questions_it_states() {
+    // §4.7's table, verbatim:
+    //
+    // | `git.commit.local`     | does a commit with this tree and message exist
+    // |                        | on the run branch?
+    // | `git.fetch_into_main`  | does the target ref point at the expected sha?
+    //
+    // S3 deliberately left both kinds out — "a kind whose intent/confirm path
+    // does not exist is a lie the ledger would tell on restart". S5 supplies
+    // both paths, so both kinds appear.
+    assert_eq!(SideEffectKind::GitCommitLocal.as_str(), "git.commit.local");
+    assert_eq!(
+        SideEffectKind::GitFetchIntoMain.as_str(),
+        "git.fetch_into_main"
+    );
+    assert!(
+        SideEffectKind::GitCommitLocal
+            .did_it_happen_question()
+            .contains("run branch")
+    );
+    assert!(
+        SideEffectKind::GitFetchIntoMain
+            .did_it_happen_question()
+            .contains("expected sha")
+    );
+}
+
+#[test]
+fn the_git_preconditions_round_trip_so_a_restart_can_recheck_them() {
+    // The ledger row is the only thing a restarted Conductor has. If a
+    // precondition cannot be read back, the effect is undecidable and the run
+    // halts for a human — so the round trip is the load-bearing property, not a
+    // serde formality.
+    for precondition in [
+        Precondition::CommitOnBranch {
+            path: "/workspaces/r-0041".to_string(),
+            branch: "conductor/T-0012/r-0041".to_string(),
+            tree: "0f9c1a".to_string(),
+            message_marker: "Conductor-Run: r-0041".to_string(),
+        },
+        Precondition::RefAtSha {
+            path: "/repo".to_string(),
+            reference: "refs/heads/conductor/T-0012/r-0041".to_string(),
+            sha: "abc123".to_string(),
+        },
+    ] {
+        let json = serde_json::to_string(&precondition).expect("serialize");
+        let back: Precondition = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(precondition, back);
+        assert!(!back.path().is_empty());
+    }
+}
+
+#[test]
+fn the_two_git_effects_have_distinct_operation_ids_for_the_same_run_and_tree() {
+    // Both effects of one attempt share run, ordinal and tree. Only the `kind`
+    // component separates them, so if it were dropped from the hash the fetch
+    // would resolve the commit's ledger row — and a restart would conclude the
+    // commit had already happened because the fetch had.
+    let commit = OperationId::compute(SideEffectKind::GitCommitLocal, &run("r-0041"), 1, "tree-a");
+    let fetch = OperationId::compute(
+        SideEffectKind::GitFetchIntoMain,
+        &run("r-0041"),
+        1,
+        "tree-a",
+    );
+    assert_ne!(commit, fetch);
+}

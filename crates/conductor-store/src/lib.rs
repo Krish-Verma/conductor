@@ -12,13 +12,16 @@ pub mod migrate;
 pub mod run;
 pub mod schema;
 pub mod side_effect;
+pub mod task;
 pub mod tx;
 pub mod verification;
 
 use std::path::{Path, PathBuf};
 
 use conductor_core::effect::{OperationId, Precondition, SideEffectKind, SideEffectState};
-use conductor_core::{EventKind, Fence, ReconciledRoute, RunId, RunState, TerminalAttempt};
+use conductor_core::{
+    EventKind, Fence, ReconciledRoute, RunId, RunState, TaskId, TaskState, TerminalAttempt,
+};
 use rusqlite::{Connection, OpenFlags};
 
 pub use attempt::{AttemptRow, NewAttempt};
@@ -29,6 +32,7 @@ pub use migrate::{MigrationStep, migrate};
 pub use run::{FindingRow, RunRow};
 pub use schema::PragmaReport;
 pub use side_effect::SideEffectRow;
+pub use task::{NewRun, NewTask, TaskRow};
 pub use tx::with_immediate;
 
 /// An open store.
@@ -259,6 +263,18 @@ impl Store {
         lease::route_reconciled(&mut self.conn, fence, route, detail, now_ms)
     }
 
+    /// Leave `VERIFYING` — §5.2's "`VERIFYING → COMPLETE` requires §4.5's seven
+    /// criteria".
+    pub fn route_verified(
+        &mut self,
+        fence: &Fence,
+        route: ReconciledRoute,
+        detail: &str,
+        now_ms: i64,
+    ) -> StoreResult<RunState> {
+        lease::route_verified(&mut self.conn, fence, route, detail, now_ms)
+    }
+
     /// Append one evidence row. Fenced.
     pub fn record_event(
         &mut self,
@@ -420,5 +436,37 @@ impl Store {
     /// Every effect a human must decide about.
     pub fn ambiguous_effects(&self) -> StoreResult<Vec<SideEffectRow>> {
         side_effect::ambiguous_effects(&self.conn)
+    }
+
+    // -- tasks and runs (S5) ------------------------------------------------
+
+    /// Create a task in `PENDING`.
+    pub fn create_task(&mut self, task: &NewTask, now_ms: i64) -> StoreResult<TaskRow> {
+        task::create_task(&mut self.conn, task, now_ms)
+    }
+
+    /// Create a run in `READY` for an existing task.
+    pub fn create_run(&mut self, run: &NewRun, now_ms: i64) -> StoreResult<()> {
+        task::create_run(&mut self.conn, run, now_ms)
+    }
+
+    /// One task by id.
+    pub fn task(&self, id: &TaskId) -> StoreResult<Option<TaskRow>> {
+        task::task_row(&self.conn, id)
+    }
+
+    /// Every task, optionally filtered by state.
+    pub fn tasks(&self, state: Option<TaskState>) -> StoreResult<Vec<TaskRow>> {
+        task::tasks(&self.conn, state)
+    }
+
+    /// The one non-terminal run of a task, if it has one.
+    pub fn active_run_for_task(&self, task_id: &TaskId) -> StoreResult<Option<RunId>> {
+        run::active_run_for_task(&self.conn, task_id.as_str())
+    }
+
+    /// Move a task, refusing anything §5.2's machine does not draw.
+    pub fn set_task_state(&mut self, id: &TaskId, to: TaskState) -> StoreResult<TaskState> {
+        task::set_task_state(&mut self.conn, id, to)
     }
 }

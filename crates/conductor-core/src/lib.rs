@@ -18,6 +18,7 @@ pub mod fence;
 pub mod ids;
 pub mod report;
 pub mod state;
+pub mod task;
 pub mod verification;
 
 pub use attempt::{Attempt, AttemptState, TerminalAttempt};
@@ -32,4 +33,5 @@ pub use report::{AgentReport, ReportClaim};
 pub use state::{
     AttemptOutcome, ParseStateError, PlanVersionState, ReconciledRoute, RunState, TaskState,
 };
+pub use task::{TaskSpec, TaskSpecError, TransitionError, ValidatedTaskSpec};
 pub use verification::VerificationOutcome;

@@ -421,3 +421,164 @@ fn sigterm_is_tried_before_sigkill() {
         Liveness::Dead
     ));
 }
+
+// ---------------------------------------------------------------------------
+// Grandchildren — the gap S4 found in the verification runner and recorded as
+// still open here (S4 completion report: "`supervise.rs` has the same latent
+// gap for agents. S5 must close it.").
+// ---------------------------------------------------------------------------
+
+/// An "agent" that forks a grandchild and then goes silent.
+///
+/// Deliberately `/bin/sh` rather than the fake agent: the property under test is
+/// the supervisor's, not the adapter's, and no catalogued scenario forks. The
+/// adapter is still a `FakeAgent` because `supervise` only uses it to parse
+/// lines.
+fn forking_agent(dir: &std::path::Path, hold_stdout: bool) -> conductor_agent::AgentCommand {
+    // The grandchild records its own pid so the test can probe the exact
+    // process rather than pattern-matching a process table.
+    std::fs::write(
+        dir.join("grandchild.sh"),
+        "echo $$ > grandchild.pid\nwhile :; do sleep 1; done\n",
+    )
+    .expect("write the grandchild script");
+
+    // The parent loop is not `exec`ed away: the direct child must stay alive and
+    // silent so the **idle** timer is what ends it.
+    let redirect = if hold_stdout { "" } else { " >/dev/null 2>&1" };
+    let script = format!(
+        "sh grandchild.sh{redirect} &\n\
+         echo agent-ready\n\
+         while :; do sleep 1; done\n"
+    );
+
+    let mut env = std::collections::BTreeMap::new();
+    if let Ok(path) = std::env::var("PATH") {
+        env.insert("PATH".to_string(), path);
+    }
+    conductor_agent::AgentCommand {
+        program: std::path::PathBuf::from("/bin/sh"),
+        args: vec!["-c".to_string(), script],
+        env,
+        cwd: dir.to_path_buf(),
+    }
+}
+
+/// Read the grandchild's pid once it has written it.
+fn grandchild_pid(dir: &std::path::Path) -> i32 {
+    let path = dir.join("grandchild.pid");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if let Ok(text) = std::fs::read_to_string(&path)
+            && let Ok(pid) = text.trim().parse::<i32>()
+        {
+            return pid;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("the grandchild never announced itself; nothing is being tested");
+}
+
+#[test]
+fn a_timed_out_agent_takes_its_grandchildren_with_it() {
+    // S4 found this exact gap in the verification runner and fixed it there with
+    // `setpgid` + a process-group kill; its report left the agent supervisor
+    // open. The cost is not the delay: a grandchild left running inside the
+    // workspace writes files **after** reconciliation has observed the tree,
+    // which is the same class of bug as a green result for a tree that never
+    // existed.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let scenario = scenario_file(dir.path(), "success");
+    let adapter = FakeAgent::new(fake_agent_binary(), scenario);
+    let command = forking_agent(dir.path(), false);
+
+    let agent = spawn(&command).expect("spawn");
+    let child = agent.pid();
+    let grandchild = grandchild_pid(dir.path());
+    assert!(
+        matches!(
+            conductor_run::supervise::probe(grandchild, 0),
+            Liveness::Alive(_)
+        ),
+        "the grandchild must be alive before the kill, or the test proves nothing"
+    );
+
+    let supervised = agent.supervise(&adapter, &config(), |_| {});
+    assert!(
+        matches!(supervised.end, SupervisionEnd::TimedOut { .. }),
+        "the agent should have been ended by the idle timer: {:?}",
+        supervised.end
+    );
+
+    // The direct child dying is not in question; the grandchild is.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut alive = true;
+    while Instant::now() < deadline {
+        if matches!(
+            conductor_run::supervise::probe(grandchild, 0),
+            Liveness::Dead
+        ) {
+            alive = false;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if alive {
+        // Never leak a spinning process out of a failing test.
+        unsafe {
+            libc::kill(grandchild, libc::SIGKILL);
+        }
+    }
+    assert!(
+        !alive,
+        "grandchild {grandchild} outlived the agent {child} Conductor killed; it is \
+         still running inside the workspace and can still write to the tree"
+    );
+}
+
+#[test]
+fn a_grandchild_holding_the_output_pipe_cannot_wedge_the_supervisor() {
+    // The same gap, in the form that is worse than a leak. The reader threads
+    // end at EOF, and EOF only arrives when the **last** writer of the pipe
+    // closes it. A grandchild that inherited stdout therefore blocks
+    // `finish()`'s `handle.join()` for as long as it lives — which, for a
+    // `while :; do sleep 1; done`, is forever.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let scenario = scenario_file(dir.path(), "success");
+    let adapter = FakeAgent::new(fake_agent_binary(), scenario);
+    let command = forking_agent(dir.path(), true);
+
+    let agent = spawn(&command).expect("spawn");
+    let grandchild = grandchild_pid(dir.path());
+
+    // Supervision runs on its own thread so that a wedged supervisor is a failed
+    // assertion rather than a test binary that never returns.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let supervised = agent.supervise(&adapter, &config(), |_| {});
+        let _ = tx.send(supervised.end);
+    });
+
+    let ended = rx.recv_timeout(Duration::from_secs(20));
+    if ended.is_err() {
+        unsafe {
+            libc::kill(grandchild, libc::SIGKILL);
+        }
+    }
+    let ended = ended.expect(
+        "the supervisor never returned: a grandchild is holding the agent's stdout \
+         pipe open, so the reader threads never see EOF and `finish()` blocks in \
+         `join()` — the run can never be reconciled",
+    );
+    assert!(
+        matches!(ended, SupervisionEnd::TimedOut { .. }),
+        "expected the idle timer to end it: {ended:?}"
+    );
+    assert!(
+        matches!(
+            conductor_run::supervise::probe(grandchild, 0),
+            Liveness::Dead
+        ),
+        "grandchild {grandchild} survived"
+    );
+}

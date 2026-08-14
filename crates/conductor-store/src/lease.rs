@@ -256,21 +256,66 @@ pub fn route_reconciled(
     detail: &str,
     now_ms: i64,
 ) -> StoreResult<RunState> {
+    advance_from(conn, fence, RunState::Reconciling, route, detail, now_ms)
+}
+
+/// Leave `VERIFYING` — §5.2's "`VERIFYING → COMPLETE` requires §4.5's seven
+/// criteria".
+///
+/// The same shape as [`route_reconciled`] and for the same reason: the statement
+/// requires the run to *be* in `VERIFYING`, so a caller cannot complete a run
+/// that never verified. The evidence is in the route — `ReconciledRoute::
+/// Complete` carries a `VerifiedComplete`, whose only constructor is the
+/// completion gate — and this function deliberately does not re-check it. It
+/// would be checking a proof it was handed.
+pub fn route_verified(
+    conn: &mut Connection,
+    fence: &Fence,
+    route: conductor_core::ReconciledRoute,
+    detail: &str,
+    now_ms: i64,
+) -> StoreResult<RunState> {
+    advance_from(conn, fence, RunState::Verifying, route, detail, now_ms)
+}
+
+/// Move a run out of `required` into the route's state, checking §5.2's table.
+///
+/// Two guards, and they catch different mistakes. The `state = ?` clause catches
+/// a caller that skipped a state entirely — `RECONCILING` is "mandatory and
+/// unskippable". The legality check catches a caller that is in the right state
+/// and asked for a destination the machine does not draw; without it,
+/// `route_reconciled` would happily write `COMPLETE` given a token, and §5.2
+/// puts `COMPLETE` downstream of `VERIFYING`.
+fn advance_from(
+    conn: &mut Connection,
+    fence: &Fence,
+    required: RunState,
+    route: conductor_core::ReconciledRoute,
+    detail: &str,
+    now_ms: i64,
+) -> StoreResult<RunState> {
     let next = route.state();
+    required
+        .as_task_state()
+        .transition_to(next.as_task_state())
+        .map_err(|e| StoreError::IllegalTaskTransition(e.to_string()))?;
+
     with_immediate(conn, |tx| {
         check_fence(tx, fence)?;
         let changed = tx.execute(
-            "UPDATE run SET state = ?2 WHERE id = ?1 AND lease_epoch = ?3 AND state = 'RECONCILING'",
+            "UPDATE run SET state = ?2 WHERE id = ?1 AND lease_epoch = ?3 AND state = ?4",
             params![
                 fence.run_id().as_str(),
                 next.as_str(),
-                fence.lease_epoch()
+                fence.lease_epoch(),
+                required.as_str(),
             ],
         )?;
         if changed == 0 {
-            return Err(StoreError::NotReconciling(
-                fence.run_id().as_str().to_string(),
-            ));
+            return Err(StoreError::NotInState {
+                run_id: fence.run_id().as_str().to_string(),
+                required,
+            });
         }
         let payload = format!(
             "{{\"to\":\"{}\",\"route\":\"{}\",\"detail\":{}}}",

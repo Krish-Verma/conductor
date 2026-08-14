@@ -27,7 +27,19 @@ path = "src/bin/conductor-s3-worker.rs"
 name = "conductor-s4-verifier"
 path = "src/bin/conductor-s4-verifier.rs"
 
+[[bin]]
+# The S5 vertical as a separate process. The six integration kill points have to
+# be injected into something that can actually die: a vertical living inside the
+# test binary would take the assertions down with it. Same reason S3 needed
+# `conductor-s3-worker` and S4 needed `conductor-s4-verifier`.
+name = "conductor-s5-vertical"
+path = "src/bin/conductor-s5-vertical.rs"
+
 [dependencies]
+# §3.4's `Conductor-Verification` trailer is a blake3 digest over the
+# evidence the completion gate read (ADR-0007: blake3 is the only digest).
+# Already in the lock via conductor-core, so no new package enters the build.
+blake3 = "1.8.6"
 conductor-agent.workspace = true
 conductor-core.workspace = true
 conductor-git.workspace = true

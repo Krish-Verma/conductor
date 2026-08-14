@@ -193,6 +193,33 @@ impl RunState {
         RunState::Verifying,
     ];
 
+    /// The same state, read as its task's.
+    ///
+    /// §5.2: the run "mirrors its task", and `the_run_state_mirrors_its_task_
+    /// variant_for_variant` holds the two enums to the same set. This makes that
+    /// mirroring usable rather than merely asserted: §5.2 draws **one** machine,
+    /// so there is one legality table
+    /// ([`TaskState::transition_to`](crate::TaskState::transition_to)) and the
+    /// run's transitions are checked against it. A second table for runs would
+    /// be a second thing to keep in agreement, which is exactly the argument
+    /// §5.2 gives for not having a separate run state machine at all.
+    pub fn as_task_state(&self) -> TaskState {
+        match self {
+            RunState::Pending => TaskState::Pending,
+            RunState::Ready => TaskState::Ready,
+            RunState::Running => TaskState::Running,
+            RunState::Reconciling => TaskState::Reconciling,
+            RunState::AwaitingApproval => TaskState::AwaitingApproval,
+            RunState::Verifying => TaskState::Verifying,
+            RunState::Blocked => TaskState::Blocked,
+            RunState::AwaitingReview => TaskState::AwaitingReview,
+            RunState::Repairing => TaskState::Repairing,
+            RunState::Complete => TaskState::Complete,
+            RunState::Cancelled => TaskState::Cancelled,
+            RunState::Superseded => TaskState::Superseded,
+        }
+    }
+
     /// The only exit from `RUNNING` (§4.8: "**Every exit from `RUNNING` passes
     /// through it** — success, crash, timeout, cancel").
     ///

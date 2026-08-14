@@ -47,6 +47,29 @@
 //! The agent's own budgets run from its first line, so the operating system's
 //! scan is charged to the startup budget — which is generous and diagnostic —
 //! and never to the agent.
+//!
+//! # Why the agent gets its own process group
+//!
+//! S4 found that an overrunning verification check leaked its grandchildren and
+//! fixed it there; its completion report recorded that this file had the same
+//! gap and left it to S5. It does, and it is worse here in two ways.
+//!
+//! * **Correctness.** An agent's descendants run *inside the workspace*. One
+//!   still running after the agent was killed writes files after reconciliation
+//!   observed the tree — the same class of bug as a green verification result
+//!   for a tree that never existed.
+//! * **Liveness.** A grandchild inherits the agent's stdout. The reader threads
+//!   end at EOF, and EOF arrives only when the **last** writer closes the pipe,
+//!   so a surviving grandchild blocks [`SpawnedAgent::finish`]'s `join()` for as
+//!   long as it lives. Measured before the fix: a `while :; do sleep 1; done`
+//!   grandchild wedged supervision indefinitely — the run could never be
+//!   reconciled at all.
+//!
+//! So `setpgid(0, 0)` in `pre_exec` makes the agent its own group leader, and
+//! every exit from [`SpawnedAgent::supervise`] passes through `finish`, which
+//! sweeps the group. Because a failing `pre_exec` makes `spawn` itself fail,
+//! holding a `SpawnedAgent` is proof the call succeeded — `kill(-pid, …)`
+//! therefore names the agent's group and can never name Conductor's.
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
@@ -279,6 +302,18 @@ pub fn spawn(command: &AgentCommand) -> std::io::Result<SpawnedAgent> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    // The agent leads its own process group, so that ending the agent ends
+    // everything it started. See the module docs for what this closes.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            if libc::setpgid(0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
 
     let mut child = cmd.spawn()?;
     let pid = child.id() as i32;
@@ -556,30 +591,54 @@ impl SpawnedAgent {
         }
     }
 
-    /// `SIGTERM`, grace, `SIGKILL` (§6.4).
+    /// `SIGTERM`, grace, `SIGKILL` (§6.4) — to the whole process group.
     ///
     /// The escalation is not optional and not configurable away: an agent that
     /// ignores `SIGTERM` still dies, and one that handles it gets the chance to
-    /// shut down cleanly first.
+    /// shut down cleanly first. The signal goes to the group so that an agent
+    /// which delegated its work to a subprocess does not get to leave that
+    /// subprocess behind — see the module docs.
     fn terminate(&mut self, grace: Duration) {
-        unsafe {
-            libc::kill(self.pid, libc::SIGTERM);
-        }
+        self.signal_group(libc::SIGTERM);
         let deadline = Instant::now() + grace;
         while Instant::now() < deadline {
             if let Ok(Some(_)) = self.child.try_wait() {
                 self.reaped = true;
                 self.termination_signal = Some(libc::SIGTERM);
+                // The leader shut down cleanly; anything it left behind has had
+                // the same grace period and gets no more.
+                self.sweep_group();
                 return;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        unsafe {
-            libc::kill(self.pid, libc::SIGKILL);
-        }
+        self.signal_group(libc::SIGKILL);
         let _ = self.child.wait();
         self.reaped = true;
         self.termination_signal = Some(libc::SIGKILL);
+    }
+
+    /// Signal the agent's process group and, defensively, the leader itself.
+    fn signal_group(&self, signal: i32) {
+        unsafe {
+            libc::kill(-self.pid, signal);
+            libc::kill(self.pid, signal);
+        }
+    }
+
+    /// Kill whatever is still running in the agent's group.
+    ///
+    /// **The group only, never the bare pid.** By the time this runs the leader
+    /// may already have been reaped, and its pid may in principle have been
+    /// recycled; `kill(-pid, …)` can only reach a process *group* with that id,
+    /// which a freshly recycled pid is not unless it has also become a group
+    /// leader. That is a far narrower window than `kill(pid, …)` would leave,
+    /// and it is the reason this is a separate function from
+    /// [`SpawnedAgent::signal_group`].
+    fn sweep_group(&self) {
+        unsafe {
+            libc::kill(-self.pid, libc::SIGKILL);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -631,8 +690,16 @@ impl SpawnedAgent {
         first_output_at: Option<Instant>,
     ) -> Supervised {
         let termination_signal = self.termination_signal;
-        // Join the reader threads so nothing outlives this call. They end when
-        // the pipes close, which the child's death guarantees.
+        // **Every** exit from `supervise` arrives here, which is why the group
+        // sweep lives in this function rather than at each return: an agent that
+        // exited cleanly can have left a descendant behind just as easily as one
+        // Conductor killed, and that descendant is inside the workspace.
+        //
+        // It has to happen before the join, not after. The reader threads end at
+        // EOF, and EOF arrives only when the last writer of the pipe closes it —
+        // so a surviving grandchild that inherited stdout would block the join
+        // for as long as it lives.
+        self.sweep_group();
         for handle in std::mem::take(&mut self.readers) {
             let _ = handle.join();
         }
@@ -658,10 +725,9 @@ impl Drop for SpawnedAgent {
         }
         // §2.2: always reaped, structurally. This runs on every path out of
         // `supervise`, on an early return, and on a panic that unwinds through
-        // the owner.
-        unsafe {
-            libc::kill(self.pid, libc::SIGKILL);
-        }
+        // the owner. The group, not just the leader: a panicking supervisor must
+        // not leave an agent's subprocesses writing into the workspace either.
+        self.signal_group(libc::SIGKILL);
         let _ = self.child.wait();
         for handle in std::mem::take(&mut self.readers) {
             let _ = handle.join();

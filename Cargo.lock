@@ -176,9 +176,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "conductor-agent",
  "conductor-core",
+ "conductor-git",
  "conductor-run",
  "conductor-store",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
@@ -209,6 +212,7 @@ dependencies = [
 name = "conductor-run"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "conductor-agent",
  "conductor-core",
  "conductor-git",

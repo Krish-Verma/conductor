@@ -47,13 +47,16 @@ state_enum! {
     /// The set is closed on purpose. §4.7: "an effect Conductor cannot verify
     /// afterwards is an effect Conductor may not own", which is what keeps
     /// deployment out of v1 by construction rather than by scope decision.
-    /// `git.commit.local` and `git.fetch_into_main` are listed by §4.7 and are
-    /// implemented by S5; they are absent here because a kind whose
-    /// intent/confirm path does not exist is a lie the ledger would tell on
-    /// restart.
+    ///
+    /// S3 shipped two kinds and left §4.7's two git kinds out, on the grounds
+    /// that "a kind whose intent/confirm path does not exist is a lie the ledger
+    /// would tell on restart". S5 supplies both paths — `conductor-run`'s
+    /// `effects` module — so both kinds appear here now.
     SideEffectKind {
         WorkspaceCreate => "workspace.create",
         ArtifactWrite => "artifact.write",
+        GitCommitLocal => "git.commit.local",
+        GitFetchIntoMain => "git.fetch_into_main",
     }
     terminal: []
 }
@@ -65,6 +68,10 @@ impl SideEffectKind {
         match self {
             SideEffectKind::WorkspaceCreate => "does the path exist with the expected HEAD?",
             SideEffectKind::ArtifactWrite => "does the file exist with the expected content hash?",
+            SideEffectKind::GitCommitLocal => {
+                "does a commit with this tree and message exist on the run branch?"
+            }
+            SideEffectKind::GitFetchIntoMain => "does the target ref point at the expected sha?",
         }
     }
 }
@@ -92,6 +99,34 @@ pub enum Precondition {
         /// The commit `HEAD` must resolve to.
         head: String,
     },
+    /// §4.7: "does a commit with this tree and message exist on the run branch?"
+    ///
+    /// **Tree and message, not sha.** A commit's sha depends on its timestamp
+    /// and its parent, neither of which a restarted Conductor can reproduce — so
+    /// asking "is sha X on the branch?" would answer "no" for a commit it had in
+    /// fact just made, and the effect would be performed twice. The tree is the
+    /// content Conductor intended to record, and the message marker carries the
+    /// run identity from §3.4's trailers, so together they identify *this* run's
+    /// commit of *this* tree without needing to predict a hash.
+    CommitOnBranch {
+        /// Absolute path to the repository holding the run branch.
+        path: String,
+        /// The run branch (§4.1: `conductor/<task-id>/<run-id>`).
+        branch: String,
+        /// `commit^{tree}` the commit must record.
+        tree: String,
+        /// A line the commit message must contain — the `Conductor-Run` trailer.
+        message_marker: String,
+    },
+    /// §4.7: "does the target ref point at the expected sha?"
+    RefAtSha {
+        /// Absolute path to the repository holding the ref.
+        path: String,
+        /// The fully-qualified ref name.
+        reference: String,
+        /// The commit it must resolve to.
+        sha: String,
+    },
 }
 
 impl Precondition {
@@ -100,6 +135,8 @@ impl Precondition {
         match self {
             Precondition::FileWithHash { path, .. } => path,
             Precondition::WorkspaceAtHead { path, .. } => path,
+            Precondition::CommitOnBranch { path, .. } => path,
+            Precondition::RefAtSha { path, .. } => path,
         }
     }
 }

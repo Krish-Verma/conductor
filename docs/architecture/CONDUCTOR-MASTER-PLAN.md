@@ -183,6 +183,33 @@ Then the ordinary comparison, on Conductor's own properties:
 
 **Pre-registered falsification.** If after S1–S5 more than 30% of commits are type/serde plumbing with no behaviour change, or median `cargo check` in the agent loop exceeds 90 s, this decision is wrong and must be reversed while reversal is still cheap.
 
+> ### ✅ EVALUATED AT S5 — **the trigger does not fire, and it is not close.**
+>
+> | Slice | median `cargo check --all-targets` | plumbing share |
+> |---|---:|---:|
+> | S1 | 0.33 s | 0 of 1 commit |
+> | S2 | 0.33 s | 0 of 2 |
+> | S2.5 | 1.23 s | 0 of 3 |
+> | S3 | 3.60 s | 0 of 4 |
+> | S4 | 2.21 s | ~15 % |
+> | **S5** | **3.09 s** | **~12 %** |
+>
+> Against thresholds of **90 s** and **30 %**: 29× inside on compile time, and less than
+> half the plumbing ceiling. Check time has been **flat since S3** even as the workspace
+> grew ~35 % — the workspace-crate split (§2.3) is doing the work it was chosen for.
+>
+> **The qualitative half is the more interesting result.** §2.2 argued the compiler would
+> act as "an automated reviewer that never tires". It has, repeatedly and specifically:
+> the exhaustive `match` on `Precondition` fired the instant S5 added the two git effect
+> kinds and pointed straight at the file that had forgotten them; S4's completion gate
+> uses the same mechanism deliberately, so S7 and S11 **cannot compile** without deciding
+> what their evidence means. Those are exactly the "silent, durable" errors §2.2 predicted
+> Rust would catch and TypeScript would not.
+>
+> **Decision: Rust stands. This trigger is retired for v1** — it was pre-registered for
+> S1–S5 and has been answered. Revisit only if a later slice shows a *qualitative* change
+> (a protocol-churn layer that turns into serde thrash), not on compile-time drift alone.
+
 **Dependencies:** `rusqlite` (bundled), `clap` (derive), `serde`/`serde_json`/`serde_yaml`, `blake3`, `thiserror`/`anyhow`, `tokio` (process supervision), `tempfile` (dev). Git is invoked as a **subprocess**, never via `libgit2`/`gix` — Conductor's job is to observe the same state the user observes, and the user's ground truth is the `git` binary including their `core.*` settings, hooks and filters.
 
 ## 2.3 Crate layout
@@ -655,7 +682,17 @@ The log name is qualified in practice (`.retryN`, `.<tree12>`): §4.5 itself req
 1. Every required check `PASS` **at the current tree hash**.
 2. Every conditional check triggered by the actual diff has run and passed.
 3. All invariant checks pass.
-4. Zero unresolved findings.
+4. Zero unresolved findings **of blocking severity (`CRITICAL`)**.
+
+   *(Amended at S5, which found this in direct contradiction with Part 9 row 5: a
+   malformed report raises `REPORT_UNPARSEABLE` and row 5's expected outcome is
+   `COMPLETE` + finding, Human? **no**. Read absolutely, criterion 4 blocks that
+   forever, because findings never auto-resolve (§4.8) — so one cosmetic finding would
+   permanently strand a task whose tests all pass. The severity-graded reading is also
+   the one consistent with the product thesis: verification is authoritative and the
+   agent's report is not, so a garbled report is evidence quality, not a correctness
+   signal. It is recorded, not obeyed. `CRITICAL` is the severity S3 and S4 already
+   use for halting cases.)*
 5. Every acceptance criterion binds to ≥1 passing check.
 6. Reconciliation verdict ∈ {`CLEAN_COMPLETE`, `CLEAN_NO_REPORT`}.
 7. Every policy-sensitive action detected has a matching, unexpired, correctly-scoped grant.
@@ -1079,6 +1116,21 @@ PENDING ──deps met──► READY ──claim+eligibility──► RUNNING
 ```
 
 Terminal: `COMPLETE`, `CANCELLED`, `SUPERSEDED`.
+
+**Four corrections to the diagram, all forced by building the vertical at S5.** The
+diagram above is kept as the shape; the legality table in `conductor-core/src/task.rs`
+is the authority, and these are the differences:
+
+1. **`REPAIRING → RECONCILING` cannot work and is replaced by `REPAIRING → READY`.**
+   §4.7's claim *preserves* `RECONCILING`, so a run entering repair that way would be
+   re-reconciled with **no agent ever running**. S3's report had already recorded
+   `REPAIRING → READY` as the edge that actually functions.
+2. **`RECONCILING → REPAIRING` is missing from the diagram** but is forced by §4.8's
+   `NO_CHANGE` route. Added.
+3. **`BLOCKED` is drawn with no outgoing edge yet is not terminal** — a trap that would
+   strand every blocked run. Only `→ CANCELLED` / `→ SUPERSEDED` are permitted.
+4. **`AWAITING_APPROVAL` has no exit for a denial.** Added `→ AWAITING_REVIEW`.
+   **S8 owns revisiting this** when denial semantics are actually built.
 
 **Changed from the baseline's 14 states:** `COMMITTING` removed (a commit is a Conductor-owned effect inside the `RECONCILING → COMPLETE` transaction, protected by the side-effect ledger; a state meaning "we are mid-effect" is what the ledger replaces, and having both means two mechanisms for one problem). `FAILED` removed (everything routes to `AWAITING_REVIEW` or `BLOCKED`; a terminal `FAILED` invites abandoning tasks with no decision record). `ABANDONED` removed (that is `CANCELLED` with a reason). `SUPERSEDED` added.
 
@@ -1543,7 +1595,27 @@ same latent gap for agents — S5 must close it.**
 
 ---
 
-### S5 — First vertical: task → agent → reconcile → verify → commit
+### S5 — First vertical: task → agent → reconcile → verify → commit  ✅ **COMPLETE 2026-08-13**
+
+**Outcome.** The spine runs: `PENDING → COMPLETE` with a real commit carrying real
+trailers, `main` untouched. Task legality table, side-effect ledger for
+`git.commit.local` and `git.fetch_into_main` with **3-valued** preconditions, six
+integration kill points, `conductor task run|show|list`. 78 new tests (**536 total**,
+3m21s). Schema v4 adds `run.target_branch`. **Rust falsification trigger evaluated: does
+not fire** (§2.2). Report: `docs/reports/S5-completion-report.md`.
+
+**Trailers populated at S5:** `Conductor-Run`, `Conductor-Policy`,
+`Conductor-Verification` (recomputable from the artifacts). **`Conductor-Plan` (S11) and
+`Conductor-Approval` (S8) are absent, not invented** — §3.4 exists so the trail survives
+total local state loss, and a reader recovering from nothing cannot tell a fabricated
+hash from a real one, so one made-up value poisons all five. A test asserts both the
+presence and the absence.
+
+**The S4 carry-forward is closed, and the gap was worse than S4 thought.** A grandchild
+holding the agent's stdout pipe open didn't merely delay things — the reader threads
+never saw EOF, `finish()` blocked in `join()`, and **the run could never be reconciled**.
+Closed with `setpgid` + a group sweep in `finish()`, on every return path including a
+clean exit.
 
 **Objective.** One fake-agent task from `PENDING` to `COMPLETE`, end to end, with a real commit.
 **Why now.** Proves the spine before policy, approvals or packets add surface.
@@ -1718,7 +1790,7 @@ Every row is a test. "Retry?" = an automatic agent attempt. "Human?" = execution
 | 19 | Evidence provider absent | no third-party binary on `PATH` | n/a | proceed unchanged | no | no | `COMPLETE` |
 | 20 | Concurrent projects | 2 runs, 2 repos | independent rows and clones | no cross-contamination | no | no | both `COMPLETE` |
 | 21 | Plan revision mid-flight | approve v4 during a v3 run | run keeps `plan_version=3` | finish under v3; new tasks under v4 | no | at review | `COMPLETE` under v3 |
-| 22 | Duplicate side effect | kill between effect and confirm | `side_effect` `INTENDED` | re-check precondition; do not re-run | no | only if ambiguous | **exactly one commit** |
+| 22 | Duplicate side effect | kill between effect and confirm | `side_effect` `INTENDED` | re-check precondition; do not re-run | no | only if ambiguous | **exactly one commit** — *see note* |
 | 23 | Policy change during run | edit policy mid-run | run keeps `policy_hash` | old snapshot; **pause if strictly tighter** | no | if tighter | `COMPLETE` / `AWAITING_APPROVAL` |
 | 24 | Verification passes, policy violated | tests green + forbidden change | `POLICY_SENSITIVE` | **policy wins over green tests** | no | **yes** | `AWAITING_APPROVAL` |
 | 25 | Approval revoked mid-effect | revoke during `INTENDED` | grant `REVOKED`, effect recorded | complete/fail the effect, then halt | no | **yes** | `AWAITING_REVIEW` |
@@ -1729,6 +1801,19 @@ Every row is a test. "Retry?" = an automatic agent attempt. "Human?" = execution
 | 30 | **Ineligible execution mode** | sensitive task, caps below requirement | attempt never starts | refuse with dimension named | no | **yes** | `BLOCKED` |
 
 Rows 14, 15, 22, 24, 26, 27, 28, 29, 30 are the ones that most distinguish this design.
+
+**Note on row 22 — its counting assertion is necessary but not sufficient (found at S5).**
+"Assert exactly one commit and one ref update" cannot fail for either git effect under a
+fixed `operation_id`, because **git is itself idempotent for both**: `git fetch` of an
+unchanged ref performs no ref update at all (measured: reflog 1 before and after a blind
+second fetch), and git refuses an empty commit. Disabling the fetch precondition re-check
+therefore leaves the whole matrix green.
+
+So the counting assertion must be paired with a test of the property that *can* fail —
+that an effect Conductor cannot decide is recorded `AMBIGUOUS` and halts, rather than
+being overwritten. `a_ref_conductor_did_not_move_is_noticed_rather_than_overwritten` is
+that test, and it was falsified (reducing the precondition to two values makes it fail
+with a non-fast-forward rejection). Keep both.
 
 ---
 
