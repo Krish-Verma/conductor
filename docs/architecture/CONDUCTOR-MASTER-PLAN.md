@@ -54,7 +54,7 @@ These are experimental results from this machine, not assumptions. Everything in
 | **M25** | `fullfsync=1` is genuinely applied by `rusqlite`, not silently dropped | reads back `1`; ~9× median cost vs `fullfsync=0` (3.44 vs 0.36 ms at 4w) corroborates `F_FULLSYNC` (ADR-0005) |
 | **M26** | Worst-case claim latency moved 1093 ms → **5147 ms** under `rusqlite` | 16 writers saturated; narrows the 60 s lease margin from ~55× to **~12×** (ADR-0005) |
 | **M28** | Claude Code under `codex sandbox` measures **identical to Codex** on all four gating dimensions | Restricted/Hard/Hard/None, exceptions `/tmp`+`$TMPDIR`. Confirms containment is a launcher property (M13). Does **not** show Claude *functions* there — the same sandbox denies the network it needs (S2.5) |
-| **M29** | macOS scans a freshly built binary on first execution: **21.7 s cold vs 3.3 s warm** | Caused a probe to exceed its deadline under parallel test load; the harness correctly reported `broken` rather than a false `Hard`. Matters for every slice that spawns a new binary (S3+) |
+| **M29** | First execution of a freshly built binary costs **~228 ms cold vs ~3.9 ms warm** — *corrected at S4* | **The original S2.5 figure (21.7 s / 3.3 s) was wrong**: it timed a whole `codex sandbox` probe run and attributed all of it to the OS binary scan. Re-measured at S4 over 3 cold/warm pairs and independently reproduced (234/228/224 ms cold vs 3.3/3.6/4.8 ms warm). The scan lands **after** `spawn()` returns (spawn is ~200–350 µs either way), so "start the clock after spawn" does **not** absorb it — a startup grace period until *first output* does. Still real, still worth absorbing; two orders of magnitude smaller than recorded |
 | **M27** | Three of Part 5.1's six pragmas are already the dependency's defaults | `libsqlite3-sys` compiles `-DSQLITE_DEFAULT_FOREIGN_KEYS=1`; `rusqlite` calls `sqlite3_busy_timeout(db,5000)` on open; `synchronous` sits at SQLite's compile default. Readback alone is weak evidence; `fullfsync` is the discriminating pragma (ADR-0005) |
 
 **Two prior claims were refuted by these measurements** and the architecture below reflects the corrected position: (a) that a default local clone is an isolation boundary — it is not (M2); (b) that a `0600` unix socket plus environment scrubbing constitutes a human-only approval channel — it does not, except under a sandboxed launcher (M10/M11).
@@ -645,7 +645,11 @@ Consequences: free caching (re-verifying an unchanged tree is a lookup, which ma
 
 `INCONCLUSIVE` covers timeout, infrastructure error and flaky-retry disagreement. It is **not** a failure, because the distinction determines what happens next: `FAIL` → repair; `INCONCLUSIVE` → bounded infra retry, then human. Collapsing them is how a broken cache turns into three wasted agent attempts.
 
-**Logs** go to `artifacts/<run>/verification/<check>-<attempt>.log`, sha256 recorded, never inlined into packets, **secret-scanned before any excerpt enters a packet.**
+**Logs** go to `artifacts/<run>/verification/<check>-<attempt>.log`, **content hash (BLAKE3) recorded** (ADR-0007), never inlined into packets, **secret-scanned before any excerpt enters a packet.**
+
+The log name is qualified in practice (`.retryN`, `.<tree12>`): §4.5 itself requires re-running a `VOID` check at the new tree, which is the *same* check and attempt at a *different* tree, so `<check>-<attempt>` alone is not unique. Logs are opened with `create_new`, so a surprise collision is an outcome rather than a silent overwrite.
+
+**`tree_hash` means the working tree, not `HEAD^{tree}`** (S4). Agent edits are uncommitted by definition, so binding results to the committed tree would make every edit invisible and `VOID` undetectable. It must honour `.gitignore`, or any check that writes to `target/` voids itself.
 
 **Completion criteria — a task may reach `COMPLETE` only when all hold:**
 1. Every required check `PASS` **at the current tree hash**.
@@ -1020,7 +1024,9 @@ CREATE TABLE finding (
 
 CREATE TABLE artifact (
   id TEXT PRIMARY KEY, run_id TEXT REFERENCES run(id),
-  kind TEXT NOT NULL, path TEXT NOT NULL, sha256 TEXT NOT NULL, created_at INTEGER NOT NULL
+  -- content_hash, not sha256: §2.2 authorises blake3 and no SHA-2, and every other
+  -- hash in the design is BLAKE3. Renamed by schema v3 (ADR-0007).
+  kind TEXT NOT NULL, path TEXT NOT NULL, content_hash TEXT NOT NULL, created_at INTEGER NOT NULL
 );
 
 CREATE TABLE containment_probe (
@@ -1501,7 +1507,29 @@ Report: `docs/reports/S3-completion-report.md`.
 
 ---
 
-### S4 — Verification runner
+### S4 — Verification runner  ✅ **COMPLETE 2026-08-13**
+
+**Outcome.** `conductor-run/verify/` (profile, classify, runner, toolchain, secrets),
+working-tree hashing in `conductor-git`, the content-addressed cache in
+`conductor-store`, and the completion gate in `conductor-core`. 116 new tests
+(**457 total**, 2m18s). The `VOID` invariant is proven non-vacuous: removing the
+after-check comparison makes the row-26 test fail with `left: Pass, right: Void`.
+`ReconciledRoute::Complete` now exists but carries a `VerifiedComplete` token whose
+only constructor is the gate. Report: `docs/reports/S4-completion-report.md`.
+
+**Enforced now: 5 of §4.5's 7 criteria.** Acceptance bindings (S11) and policy grants
+(S7) are deferred — but *not* stubbed true: each has an evidence enum with a single
+`NotEvaluated { owner }` variant, so when S7 or S11 adds a satisfied variant the
+gate's exhaustive `match` **stops compiling**. A later slice cannot silently forget
+to wire its criterion in.
+
+**Two defects found by S4's own failure injection**, both the same shape as bugs found
+in S3: a killed worker permanently blocked its successor from logging (fixed — the
+lease already excludes two live workers), and an overrunning check **leaked its
+grandchildren** (fixed with `setpgid` + process-group kill). The second is a
+correctness issue, not just a delay: a killed `cargo test` would leave compilers
+writing *inside the workspace* after the after-check hash. **`supervise.rs` has the
+same latent gap for agents — S5 must close it.**
 
 **Objective.** Run checks, bind results to tree hashes, classify four outcomes.
 **Dependencies.** S2, S3.

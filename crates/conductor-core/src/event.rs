@@ -42,6 +42,8 @@ pub enum EventKind {
     RecoveryDecision,
     /// A finding was raised. Findings never auto-resolve (§4.8).
     FindingRaised,
+    /// A verification check produced a result bound to a tree hash (§4.5).
+    VerificationRecorded,
 }
 
 impl EventKind {
@@ -60,6 +62,7 @@ impl EventKind {
         EventKind::EffectAmbiguous,
         EventKind::RecoveryDecision,
         EventKind::FindingRaised,
+        EventKind::VerificationRecorded,
     ];
 
     /// The exact string persisted in the database.
@@ -78,6 +81,7 @@ impl EventKind {
             EventKind::EffectAmbiguous => "EFFECT_AMBIGUOUS",
             EventKind::RecoveryDecision => "RECOVERY_DECISION",
             EventKind::FindingRaised => "FINDING_RAISED",
+            EventKind::VerificationRecorded => "VERIFICATION_RECORDED",
         }
     }
 }

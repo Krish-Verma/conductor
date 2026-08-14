@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::error::{StoreError, StoreResult};
 
 /// The highest schema version this binary understands.
-pub const SUPPORTED_SCHEMA_VERSION: i64 = 2;
+pub const SUPPORTED_SCHEMA_VERSION: i64 = 3;
 
 /// Pragmas as they are *set*, in application order.
 ///
@@ -305,4 +305,16 @@ ALTER TABLE attempt ADD COLUMN state TEXT NOT NULL DEFAULT 'CREATED';
 -- permanently so while the terminal set grows without bound.
 CREATE INDEX ix_attempt_in_flight ON attempt(state)
   WHERE state IN ('CREATED','STARTING','ACTIVE');
+"#;
+
+/// Schema v3 — name the artifact digest column for the hash Conductor computes.
+///
+/// §4.5 says "sha256 recorded" and Part 5.1 named the column `sha256`, but §2.2's
+/// dependency list authorises `blake3` and **no SHA-2 implementation**, and S3 had
+/// already established `content_hash()` = `blake3:<hex>`. A column named `sha256`
+/// holding a BLAKE3 digest is a lie the schema tells every later reader, and the
+/// natural "fix" would be to add an unauthorised dependency to satisfy incidental
+/// wording. Renamed instead (ADR-0007). Nothing had written the table yet.
+pub const SCHEMA_V3: &str = r#"
+ALTER TABLE artifact RENAME COLUMN sha256 TO content_hash;
 "#;

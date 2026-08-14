@@ -20,6 +20,13 @@ path = "src/bin/conductor-probe-action.rs"
 name = "conductor-s3-worker"
 path = "src/bin/conductor-s3-worker.rs"
 
+[[bin]]
+# S4's failure-injection payload. A verification runner that can be killed
+# mid-check, and that can be given an `RLIMIT_FSIZE` without imposing it on
+# every test sharing a process. See the binary's own module docs.
+name = "conductor-s4-verifier"
+path = "src/bin/conductor-s4-verifier.rs"
+
 [dependencies]
 conductor-agent.workspace = true
 conductor-core.workspace = true
@@ -38,6 +45,15 @@ libc = "0.2.189"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+# The verification profile (§4.5) is YAML, and §2.2 authorizes `serde_yaml` by
+# name. S4 is the first slice that reads a YAML file, so it is added here.
+# Known risk, recorded rather than discovered later: upstream archived this crate
+# at 0.9.34 ("+deprecated"). It is still correct and has no unsafe code, and the
+# only module that touches it is `verify::profile`, whose entire surface is one
+# `from_str` — so a future swap is a one-file change. Taken because §2.2 names it
+# and because inventing a different YAML crate would be the silent architecture
+# change CLAUDE.md forbids.
+serde_yaml = "0.9.34"
 thiserror = "2.0.20"
 
 [dev-dependencies]

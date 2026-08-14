@@ -263,6 +263,81 @@ impl ArtifactRoot {
         }
     }
 
+    /// Where a run's verification logs live — §4.5's
+    /// `artifacts/<run>/verification/`.
+    ///
+    /// Note what is *not* in the path: the attempt ordinal. §4.5 puts the
+    /// attempt in the file name (`<check>-<attempt>.log`), so every attempt of
+    /// one run writes into one directory.
+    pub fn verification_dir(&self, run_id: &RunId) -> PathBuf {
+        self.root.join(run_id.as_str()).join("verification")
+    }
+
+    /// Open a run's verification directory, adopting it if it already exists.
+    ///
+    /// # Why this one adopts where [`claim_attempt_dir`] refuses
+    ///
+    /// It was written to refuse, and a failure-injection test rejected that
+    /// immediately: kill a worker mid-check, and its **successor** could not
+    /// log anything for the rest of the run's life. That is the same shape as
+    /// the permanent stranding S3 found in `create_workspace`, and it is worse
+    /// than the problem it was guarding against.
+    ///
+    /// The guard was redundant anyway. This directory belongs to a *run*, and
+    /// exactly one worker holds a run's lease at a time — §4.7's fencing is the
+    /// ownership authority here, not a name in a JSON file. Two workers writing
+    /// into it concurrently is a state the lease already excludes.
+    ///
+    /// What is **not** relaxed:
+    ///
+    /// - A directory carrying no provenance at all is still refused. An
+    ///   unaccountable directory is §4.1's orphan case: preserve, never write.
+    /// - Individual log files are created with `create_new`
+    ///   ([`OwnedDir::write_new`] and the runner's own log opening), so
+    ///   adopting a directory can never overwrite the evidence in it.
+    pub fn open_verification_dir(
+        &self,
+        run_id: &RunId,
+        owner: &Owner,
+    ) -> Result<OwnedDir, OwnershipError> {
+        let path = self.verification_dir(run_id);
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| OwnershipError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+
+        match std::fs::create_dir(&path) {
+            Ok(()) => {
+                let provenance = Provenance {
+                    worker: owner.worker.clone(),
+                    run_id: run_id.clone(),
+                    // The directory outlives any single attempt, so it records
+                    // the one that created it rather than claiming a number it
+                    // does not have.
+                    attempt_ordinal: 0,
+                    pid: owner.pid,
+                    created_at: now_ms(),
+                };
+                write_provenance(&path, &provenance)?;
+                Ok(OwnedDir { path, provenance })
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+                match self.contested(&path) {
+                    // Adopted: the lease says this worker owns the run.
+                    OwnershipError::AlreadyOwned { path, by } => Ok(OwnedDir {
+                        path,
+                        provenance: by,
+                    }),
+                    other => Err(other),
+                }
+            }
+            Err(source) => Err(OwnershipError::Io { path, source }),
+        }
+    }
+
     /// Read a directory's provenance, if it has any.
     pub fn read_provenance(&self, dir: &Path) -> Result<Option<Provenance>, OwnershipError> {
         let path = dir.join(PROVENANCE_FILENAME);

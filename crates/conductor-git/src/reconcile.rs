@@ -69,6 +69,30 @@ pub enum Verdict {
     Corrupt,
 }
 
+/// §4.5's completion criterion 6: "Reconciliation verdict ∈ {`CLEAN_COMPLETE`,
+/// `CLEAN_NO_REPORT`}".
+///
+/// The conversion lives here because [`Verdict`] lives here, while the
+/// criterion lives in `conductor-core`, which has no dependencies. Exhaustive
+/// on purpose: an eighth verdict added to §4.8 will not compile until somebody
+/// decides whether it may complete a task, which is the opposite of defaulting
+/// to "clean".
+impl From<Verdict> for conductor_core::completion::ReconciliationEvidence {
+    fn from(verdict: Verdict) -> Self {
+        use conductor_core::completion::ReconciliationEvidence as Evidence;
+        match verdict {
+            Verdict::CleanComplete | Verdict::CleanNoReport => Evidence::Clean,
+            Verdict::NoChange
+            | Verdict::OutOfScope
+            | Verdict::PolicySensitive
+            | Verdict::Contradicted
+            | Verdict::Corrupt => Evidence::NotClean {
+                verdict: verdict.to_string(),
+            },
+        }
+    }
+}
+
 impl Verdict {
     /// The exact string persisted for this verdict.
     pub fn as_str(&self) -> &'static str {
@@ -179,21 +203,16 @@ pub struct Finding {
 
 /// A verification result, per the §4.5 outcome set.
 ///
-/// S2 records it as evidence attached to the reconciliation and does not let it
-/// influence the verdict. Acceptance row 24 is the reason: policy wins over
-/// green tests, so a `PASS` must never soften anything.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum VerificationOutcome {
-    /// Verification passed.
-    Pass,
-    /// Verification failed.
-    Fail,
-    /// Verification could not decide.
-    Inconclusive,
-    /// The result is void because the tree moved underneath it.
-    Void,
-}
+/// S2 defined this enum here, because here was the only place that used it: it
+/// is recorded as evidence attached to the reconciliation and does not
+/// influence the verdict (acceptance row 24 — policy wins over green tests, so
+/// a `PASS` must never soften anything).
+///
+/// **S4 moved it to `conductor-core`.** It became a persisted value —
+/// `verification_check.outcome` — and `conductor-store` cannot depend on this
+/// crate: §2.3 makes the store and the git provider siblings. The re-export
+/// keeps every S2 call site working.
+pub use conductor_core::VerificationOutcome;
 
 /// The task's declared scope.
 ///

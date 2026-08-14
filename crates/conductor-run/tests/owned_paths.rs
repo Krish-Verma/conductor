@@ -222,3 +222,90 @@ fn adopting_a_directory_this_worker_already_owns_is_allowed() {
         .expect_err("a different worker may not");
     assert!(matches!(err, OwnershipError::AlreadyOwned { .. }));
 }
+
+// ---------------------------------------------------------------------------
+// the verification directory (S4)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_verification_directory_is_the_path_4_5_names() {
+    // §4.5: `artifacts/<run>/verification/<check>-<attempt>.log`. The attempt
+    // is in the *file* name, not in a directory level, so every attempt of a
+    // run writes into one directory.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = ArtifactRoot::new(dir.path());
+    let run = RunId::new("r-0041").expect("run id");
+    assert_eq!(
+        root.verification_dir(&run),
+        dir.path().join("r-0041").join("verification")
+    );
+}
+
+#[test]
+fn one_worker_may_re_enter_its_verification_directory_across_attempts() {
+    // Attempt 2 of a run logs into the directory attempt 1 created. Refusing
+    // that would make a repair attempt unable to log anything.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = ArtifactRoot::new(dir.path());
+    let run = RunId::new("r-0041").expect("run id");
+
+    let first = root
+        .open_verification_dir(&run, &owner("worker-a"))
+        .expect("first open");
+    let second = root
+        .open_verification_dir(&run, &owner("worker-a"))
+        .expect("the same worker may re-enter");
+    assert_eq!(first.path(), second.path());
+}
+
+#[test]
+fn a_successor_worker_may_adopt_the_verification_directory_of_a_dead_one() {
+    // Found by failure injection, not by design: with this refused, killing a
+    // worker mid-check left its successor unable to log anything for the rest
+    // of the run's life — the same permanent stranding S3 found in
+    // `create_workspace`.
+    //
+    // It is safe because a run's lease already excludes two live workers
+    // (§4.7), and because the evidence inside is protected file by file rather
+    // than by the directory.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = ArtifactRoot::new(dir.path());
+    let run = RunId::new("r-0041").expect("run id");
+
+    let dead = root
+        .open_verification_dir(&run, &owner("worker-doomed"))
+        .expect("the first worker creates it");
+    dead.write_new("typecheck-1.log", b"evidence from attempt 1")
+        .expect("write a log");
+
+    let successor = root
+        .open_verification_dir(&run, &owner("worker-successor"))
+        .expect("a successor must be able to log");
+    assert_eq!(successor.path(), dead.path());
+
+    // …and cannot destroy what the dead worker recorded.
+    let err = successor
+        .write_new("typecheck-1.log", b"overwritten")
+        .expect_err("existing evidence is never overwritten");
+    assert!(matches!(err, OwnershipError::AlreadyExists(_)));
+    assert_eq!(
+        std::fs::read_to_string(dead.path().join("typecheck-1.log")).expect("read"),
+        "evidence from attempt 1"
+    );
+}
+
+#[test]
+fn a_verification_directory_with_no_provenance_is_still_refused() {
+    // Adoption is on the strength of the lease, not on the strength of the
+    // directory merely existing. A directory Conductor cannot account for is
+    // §4.1's orphan case: preserve it, never write into it.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = ArtifactRoot::new(dir.path());
+    let run = RunId::new("r-0041").expect("run id");
+
+    std::fs::create_dir_all(root.verification_dir(&run)).expect("mkdir");
+    let err = root
+        .open_verification_dir(&run, &owner("worker-a"))
+        .expect_err("an unattributed directory is refused");
+    assert!(matches!(err, OwnershipError::Unattributed(_)));
+}

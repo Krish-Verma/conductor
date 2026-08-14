@@ -52,3 +52,4 @@ copies of a number are two things that can disagree.
 | [ADR-0004](ADR-0004-sqlite-claim-safety.md) | `BEGIN IMMEDIATE` single-statement claim is the run-claim mechanism | ACCEPTED |
 | [ADR-0005](ADR-0005-claim-latency-is-load-dependent.md) | The claim holds under `rusqlite`; its latency trigger was measuring offered load | ACCEPTED |
 | [ADR-0006](ADR-0006-the-isolation-test-recipe-was-vacuous.md) | The master plan's own hostile-workspace test recipe was vacuous in two ways | ACCEPTED |
+| [ADR-0007](ADR-0007-blake3-is-the-only-digest.md) | BLAKE3 is the only content digest; the `sha256` column was incidental wording | ACCEPTED |

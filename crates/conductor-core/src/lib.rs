@@ -10,6 +10,7 @@
 //! and reconciliation belong to S3/S5 and are deliberately absent.
 
 pub mod attempt;
+pub mod completion;
 pub mod containment;
 pub mod effect;
 pub mod event;
@@ -17,6 +18,7 @@ pub mod fence;
 pub mod ids;
 pub mod report;
 pub mod state;
+pub mod verification;
 
 pub use attempt::{Attempt, AttemptState, TerminalAttempt};
 pub use containment::{Enforcement, ExecutionCapabilities, GatingDimension, Informational};
@@ -30,3 +32,4 @@ pub use report::{AgentReport, ReportClaim};
 pub use state::{
     AttemptOutcome, ParseStateError, PlanVersionState, ReconciledRoute, RunState, TaskState,
 };
+pub use verification::VerificationOutcome;

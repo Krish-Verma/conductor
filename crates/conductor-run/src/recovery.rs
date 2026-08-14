@@ -450,7 +450,7 @@ fn recover_one(
     let route = route_for(&reconciliation);
     store.route_reconciled(
         fence,
-        route,
+        route.clone(),
         &format!("recovered: verdict={}", reconciliation.verdict),
         now_ms,
     )?;

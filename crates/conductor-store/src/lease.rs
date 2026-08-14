@@ -239,9 +239,16 @@ pub fn advance_to_reconciling(
 
 /// Route a reconciled run onwards (§4.8).
 ///
-/// The route type has no `COMPLETE` variant, so this cannot write a terminal
-/// state; and the statement requires the run to *be* in `RECONCILING`, so the
-/// step cannot be skipped by a caller that never went there.
+/// The statement requires the run to *be* in `RECONCILING`, so the step cannot
+/// be skipped by a caller that never went there.
+///
+/// **On `COMPLETE`.** S3's version of this comment said the route type had no
+/// `COMPLETE` variant and therefore this could not write a terminal state. S4
+/// adds one, and the guarantee moves rather than disappearing: the variant
+/// carries a `VerifiedComplete`, which only `completion::evaluate` can mint, so
+/// reaching `COMPLETE` still requires verification bound to a tree hash (§5.2).
+/// This function deliberately does not re-check that — it would be checking a
+/// proof it was handed — and it is not where the check belongs.
 pub fn route_reconciled(
     conn: &mut Connection,
     fence: &Fence,

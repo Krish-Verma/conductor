@@ -13,6 +13,7 @@ pub mod run;
 pub mod schema;
 pub mod side_effect;
 pub mod tx;
+pub mod verification;
 
 use std::path::{Path, PathBuf};
 

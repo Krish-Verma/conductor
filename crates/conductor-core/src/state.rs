@@ -4,7 +4,7 @@
 //! Transition rules are **not** here — they are S3/S5. This module only decides
 //! which strings are legal in which column, and how they map to Rust.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// A state column held a string that is not a member of its enum.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -214,24 +214,41 @@ impl RunState {
 
 /// Where a run goes after reconciliation.
 ///
-/// **`COMPLETE` is not a variant, and that is the enforcement.** §5.2 lists
-/// "any `→ COMPLETE` without verification bound to the final tree hash" as an
-/// invalid transition; verification is S4. Until S4 exists there is no value of
-/// this type that names `COMPLETE`, so no code path — tested or untested — can
-/// route a reconciled run to it.
+/// **`COMPLETE` cannot be named without evidence, and that is the
+/// enforcement.** §5.2 lists "any `→ COMPLETE` without verification bound to
+/// the final tree hash" as an invalid transition.
+///
+/// S3 shipped this enum with **no** `Complete` variant, on the grounds that
+/// verification did not exist yet: "until S4 supplies verification, no code
+/// path — tested or untested — can route a reconciled run to it." S4 supplies
+/// it. The variant therefore appears, but it is **not** a bare variant that any
+/// code can construct: it carries a
+/// [`VerifiedComplete`](crate::completion::VerifiedComplete), whose fields are
+/// private and whose only constructor is
+/// [`completion::evaluate`](crate::completion::evaluate). The guarantee is the
+/// same shape as [`TerminalAttempt`](crate::attempt::TerminalAttempt): the
+/// value is earned, not spoken.
 ///
 /// ```compile_fail
-/// # use conductor_core::ReconciledRoute;
-/// let _ = ReconciledRoute::Complete;
+/// # use conductor_core::{ReconciledRoute, completion::VerifiedComplete};
+/// // `VerifiedComplete` has no public constructor and no public fields.
+/// let _ = ReconciledRoute::Complete(VerifiedComplete { tree_hash: "t".to_string() });
 /// ```
 ///
-/// Non-vacuity control: the same shape with a variant that does exist compiles.
+/// Non-vacuity control: the same shape with a variant that needs no evidence
+/// compiles.
 ///
 /// ```
 /// # use conductor_core::{ReconciledRoute, RunState};
 /// assert_eq!(ReconciledRoute::Verifying.state(), RunState::Verifying);
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// **`Deserialize` is deliberately absent**, and so is `Hash`. A route that
+/// could be deserialised would let `{"COMPLETE": {"tree_hash": "…"}}` from a
+/// file, a socket or a packet mint a `VerifiedComplete` — the exact back door
+/// the private constructor exists to close. The type is written out as
+/// evidence, never read back in as authority; what is read back is the
+/// `run.state` column, which is a [`RunState`] and carries no proof at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ReconciledRoute {
     /// Changes are in scope and explained: run the verification profile.
@@ -244,6 +261,12 @@ pub enum ReconciledRoute {
     Blocked,
     /// The attempt did nothing useful and budget remains: try again.
     Repairing,
+    /// Every completion criterion S4 owns held at the run's current tree.
+    ///
+    /// The payload is the proof. It also carries the criteria that were
+    /// deferred to a later slice, so a `COMPLETE` reached today is explicit
+    /// about what it did not check.
+    Complete(crate::completion::VerifiedComplete),
 }
 
 impl ReconciledRoute {
@@ -255,6 +278,7 @@ impl ReconciledRoute {
             ReconciledRoute::AwaitingReview => RunState::AwaitingReview,
             ReconciledRoute::Blocked => RunState::Blocked,
             ReconciledRoute::Repairing => RunState::Repairing,
+            ReconciledRoute::Complete(_) => RunState::Complete,
         }
     }
 
@@ -311,9 +335,13 @@ mod tests {
     }
 
     #[test]
-    fn no_route_out_of_reconciliation_reaches_complete() {
-        // The type has no COMPLETE variant; this pins the consequence, which is
-        // that nothing reachable from reconciliation writes a terminal state.
+    fn complete_is_the_only_route_that_reaches_a_terminal_state() {
+        // S3's version of this test asserted that *no* route was terminal,
+        // because the type had no `Complete` variant at all. S4 adds one, and
+        // the property that replaces it is narrower and still load-bearing:
+        // every evidence-free route is non-terminal, and the single terminal
+        // route is the one whose payload cannot be constructed without the
+        // gate. `tests/completion.rs` pins the gate itself.
         for route in [
             ReconciledRoute::Verifying,
             ReconciledRoute::AwaitingApproval,

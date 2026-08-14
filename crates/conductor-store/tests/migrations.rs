@@ -333,3 +333,29 @@ fn migration_2_defaults_existing_attempts_to_created() {
         vec!["ok".to_string()]
     );
 }
+
+#[test]
+fn the_artifact_digest_column_is_named_for_the_hash_conductor_actually_uses() {
+    // §2.2 authorises `blake3` and no SHA-2 implementation, and S3 established
+    // content_hash() = "blake3:<hex>". A column called `sha256` holding a BLAKE3
+    // digest is a lie told by the schema to everyone who later reads it, and it
+    // would eventually be "fixed" by adding an unauthorised dependency (ADR-0007).
+    let (_dir, store) = common::temp_store();
+    let cols: Vec<String> = store
+        .conn()
+        .prepare("SELECT name FROM pragma_table_info('artifact')")
+        .expect("prepare")
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("collect");
+
+    assert!(
+        cols.iter().any(|c| c == "content_hash"),
+        "artifact must record a content_hash; columns were {cols:?}"
+    );
+    assert!(
+        !cols.iter().any(|c| c == "sha256"),
+        "artifact must not name a hash it does not compute; columns were {cols:?}"
+    );
+}

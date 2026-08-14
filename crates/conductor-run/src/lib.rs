@@ -12,6 +12,7 @@ pub mod lease;
 pub mod paths;
 pub mod recovery;
 pub mod supervise;
+pub mod verify;
 pub mod worker;
 
 pub use lease::{HeartbeatOutcome, heartbeat};

@@ -576,3 +576,39 @@ fn corrupt_in_place(path: &Path) {
     file.write_all(&[0x00, 0xff, 0x00, 0xff]).expect("write");
     file.flush().expect("flush");
 }
+
+// ---------------------------------------------------------------------------
+// the bridge to §4.5's completion criterion 6 (S4)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn only_the_two_clean_verdicts_satisfy_completion_criterion_six() {
+    use conductor_core::completion::ReconciliationEvidence;
+
+    // §4.5 criterion 6: "Reconciliation verdict ∈ {CLEAN_COMPLETE,
+    // CLEAN_NO_REPORT}". The conversion lives here because `Verdict` lives
+    // here; the criterion lives in conductor-core, which has no dependencies.
+    // Exhaustive over `Verdict`, so a new verdict cannot default to "clean".
+    for verdict in [Verdict::CleanComplete, Verdict::CleanNoReport] {
+        assert_eq!(
+            ReconciliationEvidence::from(verdict),
+            ReconciliationEvidence::Clean,
+            "{verdict:?} is one of the two §4.5 names"
+        );
+    }
+    for verdict in [
+        Verdict::NoChange,
+        Verdict::OutOfScope,
+        Verdict::PolicySensitive,
+        Verdict::Contradicted,
+        Verdict::Corrupt,
+    ] {
+        assert_eq!(
+            ReconciliationEvidence::from(verdict),
+            ReconciliationEvidence::NotClean {
+                verdict: verdict.to_string()
+            },
+            "{verdict:?} must not complete a task"
+        );
+    }
+}

@@ -11,6 +11,7 @@ pub mod error;
 pub mod git;
 pub mod quarantine;
 pub mod reconcile;
+pub mod tree;
 
 pub use baseline::{
     Baseline, CommitRecord, FileChange, HookEntry, NestedRepo, Observed, RepoHealth, StatusEntry,
@@ -25,3 +26,4 @@ pub use reconcile::{
     AgentReport, Finding, FindingKind, Reconciliation, ReportClaim, Scope, SensitivePatterns,
     Verdict, VerificationOutcome, reconcile,
 };
+pub use tree::{TreeHash, TreeHasher};

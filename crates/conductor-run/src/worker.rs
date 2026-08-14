@@ -437,7 +437,7 @@ pub fn run_one_attempt(
     let route = route_for(&reconciliation);
     store.route_reconciled(
         fence,
-        route,
+        route.clone(),
         &format!("verdict={}", reconciliation.verdict),
         now_ms(),
     )?;
@@ -457,9 +457,15 @@ pub fn run_one_attempt(
 
 /// §4.8's verdict → §5.2's next state.
 ///
-/// `COMPLETE` is not reachable and cannot be named: [`ReconciledRoute`] has no
-/// such variant, because §5.2 forbids any `→ COMPLETE` without verification
-/// bound to the final tree hash and verification is S4.
+/// **`COMPLETE` is not reachable from here, and cannot be**, which is a
+/// narrower claim than S3 could make and is still the one that matters. S3 said
+/// `ReconciledRoute` had no such variant at all; S4 adds one, but it carries a
+/// `VerifiedComplete` that only `completion::evaluate` can mint. A reconciled
+/// verdict on its own is not evidence that any check passed — §5.2 forbids any
+/// `→ COMPLETE` without verification bound to the final tree hash — so this
+/// function, which sees only a verdict, has nothing it could construct one
+/// from. The clean verdicts route to `VERIFYING`, which is where the evidence
+/// gets made.
 pub fn route_for(reconciliation: &Reconciliation) -> ReconciledRoute {
     match reconciliation.verdict {
         Verdict::Corrupt => ReconciledRoute::Blocked,
@@ -720,7 +726,7 @@ fn finish_without_agent(
     store.record_attempt_reconciled(fence, &reconciled, now_ms())?;
 
     let route = route_for(&reconciliation);
-    store.route_reconciled(fence, route, "spawn failed", now_ms())?;
+    store.route_reconciled(fence, route.clone(), "spawn failed", now_ms())?;
     observer.at(RunPoint::AfterRoute);
     store.release_lease(fence, now_ms())?;
 

@@ -38,6 +38,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "attempt_state",
         sql: schema::SCHEMA_V2,
     },
+    Migration {
+        version: 3,
+        name: "artifact_content_hash",
+        sql: schema::SCHEMA_V3,
+    },
 ];
 
 /// What [`migrate`] did about one migration.
