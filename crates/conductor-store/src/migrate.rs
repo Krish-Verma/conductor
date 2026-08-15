@@ -58,6 +58,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "approval_kinds",
         sql: schema::SCHEMA_V6,
     },
+    Migration {
+        version: 7,
+        name: "task_execution_requirements",
+        sql: schema::SCHEMA_V7,
+    },
 ];
 
 /// What [`migrate`] did about one migration.

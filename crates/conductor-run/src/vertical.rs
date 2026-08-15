@@ -96,6 +96,14 @@ pub struct VerticalConfig {
     pub sensitive: SensitivePatterns,
     /// Extra environment variables the agent is given (§4.9's allowlist).
     pub agent_env_extra: std::collections::BTreeMap<String, String>,
+    /// Which (adapter × launcher × host) measurement §4.2's gate reads.
+    ///
+    /// Not `Option`, and not the task's *requirements* — those are durable on
+    /// the task row precisely so no caller can omit them. This names the
+    /// measurement to look up, which is a property of the host and the adapter.
+    /// A key nobody has probed misses the cache, and a miss is `fail_closed()`,
+    /// so getting this wrong refuses rather than permits.
+    pub probe_key: crate::containment::cache::ProbeKey,
 }
 
 /// How the vertical ended.
@@ -157,6 +165,55 @@ struct Stage {
     changed_paths: Vec<String>,
 }
 
+/// What §4.5's criteria 6 and 7 are told about this run's policy position.
+///
+/// Derived from the run's *own state*, not from a flag a caller passed: a run
+/// that reached `VERIFYING` with a `POLICY_SENSITIVE` verdict got there by
+/// passing the policy gate, and the gate only lets it through when the action
+/// was authorized. Re-deriving it here rather than threading a boolean means a
+/// future second path into `finish` inherits the same answer.
+fn policy_position(
+    store: &Store,
+    run_id: &RunId,
+    verdict: conductor_git::Verdict,
+) -> (ReconciliationEvidence, PolicyEvidence) {
+    if verdict != conductor_git::Verdict::PolicySensitive {
+        return (
+            ReconciliationEvidence::from(verdict),
+            PolicyEvidence::NoSensitiveActions,
+        );
+    }
+
+    // The run is in `VERIFYING` with a policy-sensitive verdict, which
+    // `policy_gate::route_reconciliation` only permits after the action was
+    // either allowed by a rule or authorized by a consumed grant. Name the
+    // grant when there is one, so the completion evidence says *what*
+    // authorized it rather than merely asserting that something did.
+    let authorization = store
+        .conn()
+        .query_row(
+            "SELECT g.id FROM approval_grant g
+               JOIN approval_request r ON r.id = g.request_id
+              WHERE r.run_id = ?1 AND g.state = 'CONSUMED'
+              ORDER BY g.granted_at DESC LIMIT 1",
+            rusqlite::params![run_id.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .map(|id| format!("grant {id}"))
+        .unwrap_or_else(|| "the run's pinned policy allows the action".to_string());
+
+    (
+        ReconciliationEvidence::AuthorizedPolicySensitive {
+            verdict: verdict.to_string(),
+            authorization: authorization.clone(),
+        },
+        PolicyEvidence::AllGrantsPresent {
+            detail: authorization,
+        },
+    )
+}
+
 /// What the shared stage produced.
 struct Finished {
     verification: Option<VerificationReport>,
@@ -206,6 +263,26 @@ pub fn run_task_with_session(
     // written as one step rather than assumed away.
     if task.state == TaskState::Pending {
         store.set_task_state(&config.task_id, TaskState::Ready)?;
+    }
+
+    // §5.2's edge is `READY ──claim+eligibility──► RUNNING`, and this is the
+    // second gate on it (acceptance row 30). It runs **before** the claim: the
+    // claim moves the run to `RUNNING` atomically, and §4.8's "every exit from
+    // `RUNNING` passes through reconciliation" must not need an exception for a
+    // run that never launched an agent.
+    //
+    // A refusal is durable — `BLOCKED` plus a `CRITICAL` finding naming the
+    // dimension — because row 30's expected persisted state is `BLOCKED` and a
+    // refusal nobody can read afterwards is not a refusal a human can act on.
+    match crate::enforce::launch::gate(store, &config.task_id, &config.probe_key) {
+        Ok(None) => {}
+        Ok(Some(refusal)) => return Err(block_ineligible(store, config, &refusal.detail)),
+        // A gate that could not decide is a gate that has not permitted
+        // anything. Falling through on error would turn every unreadable
+        // requirement into an ungated launch — the single most valuable bug an
+        // attacker could hope to find here — so the error routes to exactly the
+        // same refusal the decided case does.
+        Err(error) => return Err(block_ineligible(store, config, &error.to_string())),
     }
 
     let claimed = store
@@ -410,6 +487,39 @@ pub fn resume_task(
     })
 }
 
+/// Pick a run back up after a human answered its approval request — acceptance
+/// rows 12, 13 and 25.
+///
+/// Deliberately **not** a second finishing sequence. It moves the run out of
+/// `AWAITING_APPROVAL` and hands it to [`resume_task`], which is the same path
+/// a crashed run takes: reconcile against the stored baseline, then verify,
+/// gate and integrate. Two paths to `COMPLETE` would mean the crash matrix
+/// proves things about one of them.
+///
+/// **No agent is launched**, for the reason [`resume_task`] documents: the work
+/// is already in the workspace, and a fresh attempt would re-capture the
+/// baseline from it and reconcile the approved change away as `NO_CHANGE`.
+///
+/// **The grant is not consumed here.** It is consumed at the policy gate on the
+/// way through, where the binding is recomputed from the decision actually
+/// being made (§4.3: "immediately before the side effect"). That is what makes
+/// a revoked-in-the-meantime grant stop the run rather than merely being
+/// noticed afterwards — and it is why this function does not need to know which
+/// grant, or whether there is one.
+pub fn resume_on_grant(
+    store: &mut Store,
+    config: &VerticalConfig,
+    now_ms: i64,
+    observer: &mut dyn VerticalObserver,
+) -> Result<Resumed, WorkerError> {
+    let run_id = store.active_run_for_task(&config.task_id)?.ok_or_else(|| {
+        WorkerError::Adapter(format!("task {} has no active run", config.task_id))
+    })?;
+    store.resume_after_grant(&run_id, "an approval request was answered", now_ms)?;
+    mirror(store, &config.task_id, RunState::Reconciling)?;
+    resume_task(store, config, now_ms, observer)
+}
+
 /// Verify → gate → integrate → complete, for a run already in `VERIFYING`.
 #[allow(clippy::too_many_arguments)]
 fn finish(
@@ -457,7 +567,12 @@ fn finish(
         attempt_ordinal: stage.ordinal,
         attempt_id: stage.attempt_id.clone(),
         owner: Owner::new(config.worker_id.clone(), std::process::id() as i32),
-        env: crate::worker::agent_environment(&workspace),
+        // The same isolated environment the agent ran under. A verification
+        // command that could reach a credential the agent could not would make
+        // the boundary a property of which process is running, not of the run.
+        env: crate::enforce::env::prepare(&workspace)
+            .map_err(|e| WorkerError::Adapter(format!("verification environment: {e}")))?
+            .into_vars(),
         commit_sha: run.base_commit.clone(),
         changed_paths: stage.changed_paths.clone(),
         startup_grace: config.startup_grace,
@@ -481,7 +596,8 @@ fn finish(
     // check whose tree moved under it is caught here rather than trusted.
     let tree_hash = hasher.hash()?.as_str().to_string();
 
-    // ---- the completion gate (S4) ----------------------------------------
+    // ---- the completion gate (S4, with S9's criteria 6 and 7) ------------
+    let (reconciliation, policy) = policy_position(store, &run_id, stage.verdict);
     let evidence = CompletionEvidence {
         tree_hash: tree_hash.clone(),
         required: report.checks_evidence(CheckKind::Required),
@@ -491,10 +607,8 @@ fn finish(
         acceptance: AcceptanceEvidence::NotEvaluated {
             owner: Slice::S11PlanLedger,
         },
-        reconciliation: ReconciliationEvidence::from(stage.verdict),
-        policy: PolicyEvidence::NotEvaluated {
-            owner: Slice::S7Policy,
-        },
+        reconciliation,
+        policy,
     };
 
     let verified = match conductor_core::completion::evaluate(&evidence) {
@@ -642,6 +756,40 @@ fn finish(
             })
         }
     }
+}
+
+/// Record row 30's refusal and return the error the caller sees.
+///
+/// The run moves `READY → BLOCKED` and a `CRITICAL` finding carries the
+/// dimension, the requirement and the measured value. Both happen in one store
+/// transaction, so there is no window in which a run is blocked with no reason
+/// attached or carries a reason while still looking launchable.
+///
+/// Best-effort on the *task* mirror only: if the run row is blocked and the
+/// mirror write fails, the run is still blocked, and reporting the original
+/// refusal is more useful than replacing it with a bookkeeping error.
+fn block_ineligible(store: &mut Store, config: &VerticalConfig, detail: &str) -> WorkerError {
+    let run_id = match store.active_run_for_task(&config.task_id) {
+        Ok(Some(run_id)) => run_id,
+        Ok(None) => {
+            return WorkerError::Adapter(format!(
+                "task {} is ineligible to launch ({detail}), and has no active \
+                 run to record it against",
+                config.task_id
+            ));
+        }
+        Err(error) => return WorkerError::Store(error),
+    };
+
+    let finding_id = crate::enforce::launch::finding_id(&run_id);
+    if let Err(error) = store.refuse_ineligible_launch(&run_id, &finding_id, detail, now_ms()) {
+        return WorkerError::Store(error);
+    }
+    let _ = mirror(store, &config.task_id, RunState::Blocked);
+
+    WorkerError::Adapter(format!(
+        "run {run_id} may not launch unattended on this host: {detail}"
+    ))
 }
 
 /// Write `COMPLETE` — the one place in the crate that can.

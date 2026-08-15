@@ -254,6 +254,31 @@ impl Store {
         lease::advance_to_reconciling(&mut self.conn, fence, evidence, now_ms)
     }
 
+    /// Refuse to launch a `READY` run on §4.2 eligibility grounds — row 30.
+    ///
+    /// Unfenced by design; see [`lease::refuse_ineligible_launch`].
+    pub fn refuse_ineligible_launch(
+        &mut self,
+        run_id: &RunId,
+        finding_id: &str,
+        detail: &str,
+        now_ms: i64,
+    ) -> StoreResult<RunState> {
+        lease::refuse_ineligible_launch(&mut self.conn, run_id, finding_id, detail, now_ms)
+    }
+
+    /// Re-enter reconciliation after an approval was answered — rows 12, 13.
+    ///
+    /// Unfenced by design; see [`lease::resume_after_grant`].
+    pub fn resume_after_grant(
+        &mut self,
+        run_id: &RunId,
+        detail: &str,
+        now_ms: i64,
+    ) -> StoreResult<RunState> {
+        lease::resume_after_grant(&mut self.conn, run_id, detail, now_ms)
+    }
+
     /// Route a reconciled run onwards. Fenced, and impossible to point at
     /// `COMPLETE`.
     pub fn route_reconciled(
@@ -502,6 +527,21 @@ impl Store {
     /// Every task, optionally filtered by state.
     pub fn tasks(&self, state: Option<TaskState>) -> StoreResult<Vec<TaskRow>> {
         task::tasks(&self.conn, state)
+    }
+
+    /// A task's §4.2 `execution_requirements`, as written. `None` = nothing
+    /// gated.
+    pub fn execution_requirements(&self, id: &TaskId) -> StoreResult<Option<String>> {
+        task::execution_requirements(&self.conn, id)
+    }
+
+    /// Record a task's §4.2 `execution_requirements`. `None` clears them.
+    pub fn set_execution_requirements(
+        &mut self,
+        id: &TaskId,
+        yaml: Option<&str>,
+    ) -> StoreResult<()> {
+        task::set_execution_requirements(&mut self.conn, id, yaml)
     }
 
     /// The one non-terminal run of a task, if it has one.

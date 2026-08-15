@@ -77,7 +77,16 @@ pub const NOT_DETECTED: &[&str] = &[
     "a secret that has been base64-, hex- or URL-encoded",
     "a secret inside binary output that does not decode as UTF-8 text",
     "a password passed positionally, e.g. `mysql -u root hunter2`",
-    "anything requiring entropy analysis, which S9 owns",
+    // Corrected at S9. The original text said entropy analysis was "S9's",
+    // and S9 did not build it: the slice's scanning scope is the post-run
+    // audit surface, and adding an entropy detector would have meant a
+    // false-positive budget nobody has measured. Naming a slice that will
+    // fix a gap, and then not fixing it, is how a limitation becomes a
+    // promise. It is a real limitation with no owner, and says so.
+    "anything requiring entropy analysis — not implemented, and not scheduled",
+    // Added at S9, when separator-splitting closed the `NAME=value` case.
+    "a credential glued to other characters with no separator between them, \
+     e.g. `prefixAKIAIOSFODNN7EXAMPLEsuffix` — the scanner is token-oriented",
 ];
 
 /// One detected secret, as a byte range in the text that was scanned.
@@ -169,6 +178,7 @@ pub fn scan(text: &str) -> Vec<SecretMatch> {
         }
 
         scan_tokens(line, line_start, &mut found);
+        scan_separated_tokens(line, line_start, &mut found);
         scan_assignments(line, line_start, &mut found);
     }
 
@@ -223,6 +233,98 @@ fn scan_tokens(line: &str, line_start: usize, found: &mut Vec<SecretMatch>) {
                 end: line_start + offset + end,
             });
         }
+    }
+}
+
+/// The same prefix-shaped credentials, after splitting on characters that
+/// cannot occur *inside* one.
+///
+/// **Why this exists** (added at S9). [`scan_tokens`] splits on whitespace, so
+/// `AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE` is a single token: it does not start
+/// with `AKIA`, and `AWS_ACCESS_KEY_ID` is not one of [`SENSITIVE_NAMES`], so
+/// neither detector fired and the canonical first line of a `.env` file scanned
+/// **completely clean**. That is exactly the staging shape §4.9's limitation 2
+/// predicts, which made the stated mitigation weaker than it read.
+///
+/// **Why a second pass rather than changing the tokenizer.** [`url_credentials_span`]
+/// needs `scheme://user:pass@host` intact, and `:` and `/` are precisely the
+/// characters that would have to be split on. Running an additional pass leaves
+/// every existing detection exactly as it was and only adds matches; `scan`'s
+/// dedup already merges overlaps, so a credential found by both passes yields
+/// one match.
+///
+/// The separator set is deliberately narrow — the characters that delimit a
+/// value in shells, JSON, YAML, TOML and CLI flags. `_`, `-` and `.` are **not**
+/// separators: they occur inside real tokens (`ghp_…`, JWTs, `github_pat_…`).
+fn scan_separated_tokens(line: &str, line_start: usize, found: &mut Vec<SecretMatch>) {
+    const SEPARATORS: &[char] = &[
+        '=', ':', ',', ';', '"', '\'', '`', '(', ')', '[', ']', '{', '}', '<', '>', '|', '&', '?',
+        '\\',
+    ];
+    for (word_offset, word) in word_spans(line) {
+        if !word.contains(SEPARATORS) {
+            // Nothing to split; `scan_tokens` already looked at this exact
+            // string, and re-checking it would only cost time.
+            continue;
+        }
+        // A URL with inline credentials is handled whole by `scan_tokens`;
+        // splitting it here would dismember the span that detector needs.
+        if url_credentials_span(word).is_some() {
+            continue;
+        }
+        let mut piece_start = 0usize;
+        for (index, ch) in word.char_indices() {
+            if !SEPARATORS.contains(&ch) {
+                continue;
+            }
+            check_piece(word, piece_start, index, line_start + word_offset, found);
+            piece_start = index + ch.len_utf8();
+        }
+        check_piece(
+            word,
+            piece_start,
+            word.len(),
+            line_start + word_offset,
+            found,
+        );
+    }
+}
+
+/// Test one separator-delimited piece against the shaped-literal detectors.
+///
+/// Only the prefix-shaped kinds: those are the ones whose shape is evidence on
+/// its own. `AssignedSecret` is deliberately absent — it depends on the *name*
+/// beside the value, which [`scan_assignments`] already reads with the whole
+/// line in hand, and re-deciding it from a fragment would flag every
+/// `key=value` in a config file.
+fn check_piece(word: &str, start: usize, end: usize, base: usize, found: &mut Vec<SecretMatch>) {
+    if start >= end {
+        return;
+    }
+    let piece = &word[start..end];
+    let kind = if is_aws_access_key_id(piece) {
+        Some(SecretKind::AwsAccessKeyId)
+    } else if is_github_token(piece) {
+        Some(SecretKind::GitHubToken)
+    } else if is_slack_token(piece) {
+        Some(SecretKind::SlackToken)
+    } else if is_anthropic_key(piece) {
+        Some(SecretKind::AnthropicKey)
+    } else if is_generic_sk_key(piece) {
+        Some(SecretKind::GenericSkKey)
+    } else if is_google_api_key(piece) {
+        Some(SecretKind::GoogleApiKey)
+    } else if is_jwt(piece) {
+        Some(SecretKind::JsonWebToken)
+    } else {
+        None
+    };
+    if let Some(kind) = kind {
+        found.push(SecretMatch {
+            kind,
+            start: base + start,
+            end: base + end,
+        });
     }
 }
 
@@ -449,6 +551,85 @@ mod tests {
 
     fn kinds(text: &str) -> Vec<SecretKind> {
         scan(text).into_iter().map(|m| m.kind).collect()
+    }
+
+    /// A credential glued to a name by `=` is still a credential.
+    ///
+    /// **This is the shape §4.9's limitation 2 explicitly predicts** — "`/tmp`
+    /// remains writable; secret staging is possible" — and it is the first line
+    /// of every `.env` file in existence. It scanned **completely clean** until
+    /// S9, because the tokenizer split on whitespace only: the whole of
+    /// `AWS_ACCESS_KEY_ID=AKIA…` was one token, which does not start with
+    /// `AKIA`, and `AWS_ACCESS_KEY_ID` is not one of [`SENSITIVE_NAMES`], so
+    /// neither detector fired.
+    ///
+    /// `planted_secrets_are_all_found` did not catch it because every case
+    /// there is either a bare token or uses a name from the list — the corpus
+    /// was built from the detectors rather than from what an agent would
+    /// actually write.
+    #[test]
+    fn a_credential_glued_to_a_name_by_a_separator_is_still_found() {
+        for (text, expected) in [
+            (
+                "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
+                SecretKind::AwsAccessKeyId,
+            ),
+            ("AWS_KEY=AKIAIOSFODNN7EXAMPLE", SecretKind::AwsAccessKeyId),
+            (
+                "export GH=ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+                SecretKind::GitHubToken,
+            ),
+            (
+                "{\"key\":\"AKIAIOSFODNN7EXAMPLE\"}",
+                SecretKind::AwsAccessKeyId,
+            ),
+            (
+                "--token=ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+                SecretKind::GitHubToken,
+            ),
+            (
+                "Authorization:Bearer,AKIAIOSFODNN7EXAMPLE",
+                SecretKind::AwsAccessKeyId,
+            ),
+        ] {
+            assert!(
+                kinds(text).contains(&expected),
+                "{text:?} scanned as {:?}, expected to contain {expected:?}",
+                kinds(text)
+            );
+        }
+    }
+
+    /// The other half. Separator-splitting must not start flagging ordinary
+    /// code, or the scanner becomes noise and operators learn to ignore it.
+    #[test]
+    fn separator_splitting_does_not_invent_secrets_in_ordinary_code() {
+        for text in [
+            "let x = compute(a, b);",
+            "assert_eq!(response.status(), StatusCode::OK);",
+            "https://example.com/path?query=value&other=thing",
+            "const MAX_RETRIES: usize = 3;",
+            "database=postgres host=localhost port=5432",
+            "AWS_REGION=us-east-1",
+            "version = \"1.0.0\"",
+        ] {
+            assert!(
+                kinds(text).is_empty(),
+                "{text:?} was flagged as {:?}",
+                kinds(text)
+            );
+        }
+    }
+
+    /// Splitting must not break what already worked — in particular a URL with
+    /// inline credentials, whose detector needs the `scheme://user:pass@host`
+    /// span intact and would be destroyed by naive splitting on `:` and `/`.
+    #[test]
+    fn splitting_does_not_break_url_credential_detection() {
+        assert!(
+            kinds("https://user:hunter2pass@example.com/repo.git")
+                .contains(&SecretKind::UrlCredentials)
+        );
     }
 
     /// Planted secrets, §11.2's requirement. Every value here is synthetic:

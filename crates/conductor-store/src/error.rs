@@ -114,6 +114,15 @@ pub enum StoreError {
     #[error("invalid domain value read from the store: {0}")]
     Domain(String),
 
+    /// An update named a task that does not exist.
+    ///
+    /// Distinguished from "the update changed nothing" on purpose: a silent
+    /// no-op would let a caller believe it had recorded a task's execution
+    /// requirements when it had recorded them nowhere, and §4.2's gate reads
+    /// that column to decide whether a launch is permitted.
+    #[error("no task {0}")]
+    NoSuchTask(String),
+
     /// Event payload serialisation failed.
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),

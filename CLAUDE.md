@@ -94,6 +94,13 @@ Do not violate these without an ADR that first shows a current acceptance-suite 
 
 ## Current status
 
-Design complete. **S0 (measurement) done. S1 not started.** No product code exists yet.
+Design complete. **S0–S9 done. S10 (Codex adapter) not started.**
+
+S9 was the hard gate: no real coding agent runs through Conductor before it
+passes. It has, so S10 is unlocked.
+
+`SECURITY.md` is the measured honesty table — no row may claim `PREVENTED`
+without a named passing test and a positive control.
+
 Create implementation directories only when their owning slice begins — an empty
 skeleton creates false architectural commitments.

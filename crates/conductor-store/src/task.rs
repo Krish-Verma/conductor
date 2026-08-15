@@ -15,7 +15,7 @@
 //! for one problem" §5.2 rejects elsewhere.
 
 use conductor_core::{EventKind, RunId, TaskId, TaskState};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
 use crate::error::{StoreError, StoreResult};
@@ -212,4 +212,47 @@ fn to_task_row(row: &rusqlite::Row<'_>) -> StoreResult<TaskRow> {
         attempt_budget: row.get(6)?,
         created_at: row.get(7)?,
     })
+}
+
+/// A task's `execution_requirements` — §4.2's gating vector, as written.
+///
+/// `None` means the task declares no requirement, which §4.2 treats as "nothing
+/// is gated": the comparison is over an empty vector and the launch proceeds.
+/// See [`crate::schema::SCHEMA_V7`] for why that, and not a fail-closed default,
+/// is the right meaning for an absent value.
+///
+/// Returned as the operator's own YAML rather than a parsed structure, because
+/// `conductor-store` deliberately knows nothing about §4.2's dimensions — the
+/// parser lives in `conductor-run`, next to the gate that consumes it. A store
+/// that could parse the vector would be a store that could disagree with the
+/// gate about what it means.
+pub fn execution_requirements(conn: &Connection, id: &TaskId) -> StoreResult<Option<String>> {
+    let yaml: Option<Option<String>> = conn
+        .query_row(
+            "SELECT execution_requirements FROM task WHERE id = ?1",
+            params![id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(yaml.flatten())
+}
+
+/// Record a task's `execution_requirements`.
+///
+/// `None` clears them. No validation happens here for the reason above: this
+/// layer cannot tell a valid vector from an invalid one, and pretending
+/// otherwise would put a second, weaker parser in front of the real one.
+pub fn set_execution_requirements(
+    conn: &mut Connection,
+    id: &TaskId,
+    yaml: Option<&str>,
+) -> StoreResult<()> {
+    let changed = conn.execute(
+        "UPDATE task SET execution_requirements = ?2 WHERE id = ?1",
+        params![id.as_str(), yaml],
+    )?;
+    if changed == 0 {
+        return Err(StoreError::NoSuchTask(id.as_str().to_string()));
+    }
+    Ok(())
 }

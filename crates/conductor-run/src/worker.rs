@@ -280,6 +280,28 @@ pub fn run_one_attempt(
     observer.at(RunPoint::BeforeSpawn);
 
     // ---- spawn and supervise --------------------------------------------
+    //
+    // §4.9's allowlist, plus the directories it names. `prepare` does the I/O
+    // deliberately: S5 built the same map without creating the per-run `HOME`
+    // and `TMPDIR`, so both variables pointed at nothing and a tool that falls
+    // back on `ENOENT` was never contained at all.
+    let run_env = crate::enforce::env::prepare(&workspace_path).map_err(|e| {
+        WorkerError::Spawn(format!(
+            "preparing the isolated environment for {} failed: {e}",
+            workspace_path.display()
+        ))
+    })?;
+
+    // The `/tmp` window opens **before** the agent starts, or the "during the
+    // attempt window" in §4.8's surface would mean nothing: a before-snapshot
+    // taken afterwards cannot tell a file the agent wrote from one that was
+    // always there.
+    let temp_watch = crate::enforce::audit::watch_temp(
+        std::path::Path::new("/tmp"),
+        run_env.tmpdir(),
+        SystemTime::now(),
+    );
+
     let report_path = owned.path().join("report.json");
     let start = StartInput {
         run_id: run_id.clone(),
@@ -288,11 +310,10 @@ pub fn run_one_attempt(
         workspace: workspace_path.clone(),
         report_path: report_path.clone(),
         session_id: config.agent_session_id.clone(),
-        env: {
-            let mut env = agent_environment(&workspace_path);
-            env.extend(config.agent_env_extra.clone());
-            env
-        },
+        env: run_env
+            .clone()
+            .with_extra(&config.agent_env_extra)
+            .into_vars(),
     };
     let command = adapter
         .command(&start)
@@ -430,6 +451,32 @@ pub fn run_one_attempt(
         None,
     );
 
+    // §4.8's reconciled surface includes a "secret-pattern scan over the whole
+    // diff" and a "`/tmp` delta during the attempt window". Neither is derivable
+    // from the name-status lists reconciliation works with, so both are read
+    // here, from the repository and the filesystem, and turned into findings
+    // that never auto-resolve.
+    for audit in crate::enforce::audit::audit_diff_for_secrets(&full_diff(&workspace_path)) {
+        findings.push(raise(
+            store,
+            fence,
+            &run_id,
+            audit.kind(),
+            audit.severity(),
+            audit.detail(),
+        )?);
+    }
+    for audit in crate::enforce::audit::audit_temp_delta(&temp_watch) {
+        findings.push(raise(
+            store,
+            fence,
+            &run_id,
+            audit.kind(),
+            audit.severity(),
+            audit.detail(),
+        )?);
+    }
+
     for finding in reconciliation.findings() {
         findings.push(raise(
             store,
@@ -446,13 +493,25 @@ pub fn run_one_attempt(
     let reconciled = terminal.reconciled();
     store.record_attempt_reconciled(fence, &reconciled, now_ms())?;
 
-    let route = route_for(&reconciliation);
-    store.route_reconciled(
-        fence,
-        route.clone(),
-        &format!("verdict={}", reconciliation.verdict),
-        now_ms(),
-    )?;
+    // §4.8: `POLICY_SENSITIVE` means "policy evaluation → approval or review".
+    // S3 could only do the first half — it routed to `AWAITING_APPROVAL` with
+    // nothing for a human to approve. S9 evaluates the run's pinned policy and,
+    // when the answer is `require_approval`, writes the durable request that
+    // makes the state exitable (acceptance row 13).
+    let (route, detail, request_id) =
+        crate::enforce::policy_gate::route_reconciliation(store, fence, &reconciliation, now_ms())
+            .map_err(|e| WorkerError::Adapter(format!("policy gate: {e}")))?;
+    if let Some(request_id) = request_id {
+        findings.push(raise(
+            store,
+            fence,
+            &run_id,
+            "APPROVAL_REQUIRED",
+            "WARNING",
+            &format!("approval request {request_id} is open"),
+        )?);
+    }
+    store.route_reconciled(fence, route.clone(), &detail, now_ms())?;
     observer.at(RunPoint::AfterRoute);
 
     store.release_lease(fence, now_ms())?;
@@ -759,42 +818,87 @@ fn raise(
     Ok(id)
 }
 
+/// Every change in the workspace as **patch text**, for §4.8's secret scan.
+///
+/// Reconciliation works with `--name-status` lists, which say *which* files
+/// changed and never *what* is in them — so a credential added to a tracked file
+/// is invisible to it by construction. This reads the content.
+///
+/// Three sources, because a secret can be in any of them: staged changes,
+/// unstaged changes, and **untracked files**.
+///
+/// # Why untracked files are rendered by hand
+///
+/// `git diff` does not show untracked files at all, and the first version of
+/// this function said so and moved on — treating it as a documented limitation.
+/// The test that went with it disagreed immediately: the fixture agent writes a
+/// *new* file, which is the ordinary case, not the exotic one. An agent creating
+/// `src/config.rs` with a credential in it would have produced an entirely clean
+/// scan, and §4.8's "secret-pattern scan over the whole diff" would have been
+/// true of a diff that omitted most of what the agent did.
+///
+/// So each untracked file is rendered as an added-file hunk — `+` on every line,
+/// exactly as git would render it once staged. That matters beyond cosmetics:
+/// [`crate::enforce::audit`] grades a credential on an added line as `CRITICAL`
+/// and one on a context line as a warning, and a new file is unambiguously
+/// added content.
+///
+/// A git failure yields an empty string rather than an error: this is the audit
+/// layer, and failing the whole attempt because a diff could not be rendered
+/// would turn a detection gap into an outage.
+fn full_diff(workspace: &std::path::Path) -> String {
+    let mut text = String::new();
+    for args in [
+        &["diff", "--cached", "--no-color", "--no-ext-diff"][..],
+        &["diff", "--no-color", "--no-ext-diff"][..],
+    ] {
+        if let Ok(out) = conductor_git::run_git(workspace, args) {
+            text.push_str(&String::from_utf8_lossy(&out.stdout));
+            text.push('\n');
+        }
+    }
+
+    // Untracked files, rendered as added-file hunks. `--exclude-standard`
+    // honours `.gitignore` and `.git/info/exclude`, which is what keeps the
+    // per-run `HOME` and `TMPDIR` out of here — they are audited separately by
+    // `audit_temp_delta`, and scanning them twice would double every finding.
+    if let Ok(out) = conductor_git::run_git(
+        workspace,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+    ) {
+        let listing = String::from_utf8_lossy(&out.stdout).to_string();
+        for path in listing.split('\0').filter(|p| !p.is_empty()) {
+            let full = workspace.join(path);
+            // Bounded, and text only. A binary blob decoded lossily produces
+            // noise the scanner cannot use, and reading an arbitrarily large
+            // artifact into memory to audit it is its own denial of service.
+            let Ok(bytes) = std::fs::read(&full) else {
+                continue;
+            };
+            let capped = &bytes[..bytes
+                .len()
+                .min(crate::enforce::audit::MAX_SCAN_BYTES_PER_FILE)];
+            let Ok(content) = std::str::from_utf8(capped) else {
+                continue;
+            };
+            text.push_str(&format!("--- /dev/null\n+++ b/{path}\n"));
+            for line in content.lines() {
+                text.push('+');
+                text.push_str(line);
+                text.push('\n');
+            }
+        }
+    }
+
+    text
+}
+
 fn blake3_short(text: &str) -> String {
     content_hash(text.as_bytes())
         .trim_start_matches("blake3:")
         .chars()
         .take(12)
         .collect()
-}
-
-/// §4.9's allowlisted environment.
-///
-/// Not a denylist. `PATH` because agents run tools; a per-run `HOME` and
-/// `TMPDIR` inside the workspace so `~/.aws`, `~/.config/gh` and ordinary temp
-/// usage are simply absent rather than merely discouraged (M7). No
-/// `SSH_AUTH_SOCK`, no `GH_TOKEN`, no cloud variables — and no way for one to
-/// arrive later, because the map is built rather than filtered.
-pub fn agent_environment(
-    workspace: &std::path::Path,
-) -> std::collections::BTreeMap<String, String> {
-    let mut env = std::collections::BTreeMap::new();
-    if let Ok(path) = std::env::var("PATH") {
-        env.insert("PATH".to_string(), path);
-    }
-    env.insert(
-        "HOME".to_string(),
-        workspace.join(".conductor-home").display().to_string(),
-    );
-    env.insert(
-        "TMPDIR".to_string(),
-        workspace.join(".conductor-tmp").display().to_string(),
-    );
-    env.insert("LANG".to_string(), "C".to_string());
-    env.insert("TERM".to_string(), "dumb".to_string());
-    // §4.9: git must never be able to prompt for, or find, a credential.
-    env.insert("GIT_TERMINAL_PROMPT".to_string(), "0".to_string());
-    env.insert("GIT_ASKPASS".to_string(), "/bin/false".to_string());
-    env
 }
 
 fn policy_hash_of(store: &Store, run_id: &RunId) -> Result<String, WorkerError> {

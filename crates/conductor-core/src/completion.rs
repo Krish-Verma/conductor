@@ -197,6 +197,40 @@ impl FindingsEvidence {
 pub enum ReconciliationEvidence {
     /// `CLEAN_COMPLETE` or `CLEAN_NO_REPORT`.
     Clean,
+    /// `POLICY_SENSITIVE`, **and the action that made it so was authorized**
+    /// through §4.3 — added at S9.
+    ///
+    /// # Why criterion 6 has to admit this
+    ///
+    /// §4.5 states criterion 6 as "verdict ∈ {`CLEAN_COMPLETE`,
+    /// `CLEAN_NO_REPORT`}" and criterion 7 as "every policy-sensitive action
+    /// has a matching, unexpired, correctly scoped grant". Read literally, the
+    /// two cannot both matter: a run with a policy-sensitive action never has a
+    /// clean verdict — the manifest is still modified after the human approves —
+    /// so criterion 6 refuses first and **criterion 7 can never be the
+    /// deciding criterion**. A criterion that is unreachable by construction is
+    /// not a criterion.
+    ///
+    /// Worse, it makes acceptance rows 12 and 13 vacuous in the other
+    /// direction: "resumes on grant" would resume a run that then refuses to
+    /// complete no matter what the human said, so the approval would authorize
+    /// nothing.
+    ///
+    /// The reading that makes both criteria load-bearing is that criterion 6
+    /// excludes the verdicts nobody has resolved — `CORRUPT`, `CONTRADICTED`,
+    /// `OUT_OF_SCOPE`, `NO_CHANGE`, and `POLICY_SENSITIVE` *without* a grant —
+    /// and that an authorized `POLICY_SENSITIVE` is resolved by criterion 7,
+    /// which exists for exactly this case.
+    ///
+    /// This variant cannot be constructed from a verdict alone: the authorizing
+    /// evidence is a required field, so "authorized" can only be claimed by a
+    /// caller that has one.
+    AuthorizedPolicySensitive {
+        /// The verdict, still named honestly.
+        verdict: String,
+        /// What authorized it — the grant, or the rule that allowed it.
+        authorization: String,
+    },
     /// Any other verdict.
     NotClean {
         /// The verdict's name, for the refusal message.
@@ -225,6 +259,20 @@ pub enum AcceptanceEvidence {
 /// One variant on purpose, for the same reason as [`AcceptanceEvidence`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum PolicyEvidence {
+    /// Nothing the attempt did was policy-sensitive, so criterion 7 has
+    /// nothing to require. Added at S9.
+    ///
+    /// Distinct from [`PolicyEvidence::NotEvaluated`] on purpose: "we looked
+    /// and there was nothing to authorize" and "nobody looked" are the two
+    /// answers that must never be conflated, because only one of them is
+    /// evidence.
+    NoSensitiveActions,
+    /// Every policy-sensitive action observed was authorized — §4.5's criterion
+    /// 7, satisfied. Added at S9.
+    AllGrantsPresent {
+        /// Which action, and what authorized it.
+        detail: String,
+    },
     /// The policy engine does not exist yet.
     NotEvaluated {
         /// The slice that owes this.
@@ -349,6 +397,10 @@ pub fn evaluate(evidence: &CompletionEvidence) -> Result<VerifiedComplete, Vec<R
             }
             Criterion::ReconciliationVerdict => match &evidence.reconciliation {
                 ReconciliationEvidence::Clean => {}
+                // See the variant's documentation: without this arm criterion 7
+                // is unreachable and acceptance rows 12 and 13 authorize
+                // nothing.
+                ReconciliationEvidence::AuthorizedPolicySensitive { .. } => {}
                 ReconciliationEvidence::NotClean { verdict } => refusals.push(Refusal {
                     criterion: *criterion,
                     detail: format!(
@@ -369,7 +421,10 @@ pub fn evaluate(evidence: &CompletionEvidence) -> Result<VerifiedComplete, Vec<R
                 AcceptanceEvidence::NotEvaluated { .. } => deferred.push(*criterion),
             },
             Criterion::PolicyGrants => match &evidence.policy {
-                // Likewise for S7.
+                // S9 wired the policy gate into the run path, so these two are
+                // now real answers rather than a deferral.
+                PolicyEvidence::NoSensitiveActions => {}
+                PolicyEvidence::AllGrantsPresent { .. } => {}
                 PolicyEvidence::NotEvaluated { .. } => deferred.push(*criterion),
             },
         }

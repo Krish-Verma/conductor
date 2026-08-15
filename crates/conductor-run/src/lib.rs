@@ -14,6 +14,7 @@
 pub mod approval;
 pub mod containment;
 pub mod effects;
+pub mod enforce;
 pub mod lease;
 pub mod paths;
 pub mod policy;

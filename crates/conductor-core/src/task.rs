@@ -83,7 +83,24 @@ impl TaskState {
         use TaskState::*;
         match self {
             Pending => &[Ready, Cancelled, Superseded],
-            Ready => &[Running, Cancelled, Superseded],
+            // `READY → BLOCKED` is §5.2's fifth correction, forced by S9.
+            //
+            // The diagram labels this edge `READY ──claim+eligibility──►
+            // RUNNING`, which names two gates and draws only the outcome where
+            // both pass. §4.2's gate exists precisely to *refuse*, and
+            // acceptance row 30 says a refusal leaves the attempt unstarted in
+            // `BLOCKED` — a destination this table could not reach from
+            // `READY`. Until S9 the contradiction was invisible because nothing
+            // called the gate: it was a pure function with no call site, which
+            // is exactly why the master plan scored row 30 `NOT RUN` rather
+            // than `PASS`.
+            //
+            // `RUNNING → BLOCKED` is deliberately **not** added instead. §4.8's
+            // "every exit from `RUNNING` passes through reconciliation" is the
+            // invariant that makes an agent's self-report non-authoritative,
+            // and a run that never launched an agent has nothing to reconcile.
+            // Refusing before `RUNNING` keeps both statements true.
+            Ready => &[Running, Blocked, Cancelled, Superseded],
             // §4.8: "Every exit from RUNNING passes through it — success,
             // crash, timeout, cancel." Reconciliation, or a human stopping the
             // whole thing. There is no third door, and COMPLETE is emphatically
@@ -107,7 +124,30 @@ impl TaskState {
                 Repairing,
                 Cancelled,
             ],
-            AwaitingApproval => &[Ready, AwaitingReview, Cancelled],
+            // `AWAITING_APPROVAL → RECONCILING` is §5.2's sixth correction,
+            // forced by S9 wiring acceptance rows 12 and 13.
+            //
+            // The diagram's `(granted)` arrow points back at `READY`, and
+            // `READY` re-runs the agent — which **destroys the approved work**.
+            // `ensure_workspace` re-captures the baseline from the workspace as
+            // it now stands, so the very change a human just authorised becomes
+            // part of the new baseline, the next attempt reconciles as
+            // `NO_CHANGE`, and the approval authorised nothing. This is the
+            // same failure the `REPAIRING → RECONCILING` correction found from
+            // the other direction, and `resume_task`'s own documentation
+            // already describes the mechanism.
+            //
+            // `RECONCILING` is the destination that works, and it is not a new
+            // mechanism: the claim predicate already accepts `RECONCILING` and
+            // deliberately preserves it, and §4.7's recovery path reconciles
+            // against the **stored baseline artifact** rather than re-capturing
+            // one. So a granted run rejoins exactly the path a crashed-then-
+            // resumed run takes, with no second agent invocation, and the work
+            // the human approved is the work that gets verified.
+            //
+            // `READY` is kept as well: a denial or a plan revision may legitimately
+            // want a fresh attempt, and S13's review outcomes will need it.
+            AwaitingApproval => &[Ready, Reconciling, AwaitingReview, Cancelled],
             // Row 8: an INCONCLUSIVE check retried and still undecided ends at
             // AWAITING_REVIEW. Row 24's policy-over-green-tests route is
             // deliberately absent — S7 owns it and will have to add it here,

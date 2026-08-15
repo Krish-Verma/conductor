@@ -760,7 +760,21 @@ The log name is qualified in practice (`.retryN`, `.<tree12>`): §4.5 itself req
    signal. It is recorded, not obeyed. `CRITICAL` is the severity S3 and S4 already
    use for halting cases.)*
 5. Every acceptance criterion binds to ≥1 passing check.
-6. Reconciliation verdict ∈ {`CLEAN_COMPLETE`, `CLEAN_NO_REPORT`}.
+6. Reconciliation verdict ∈ {`CLEAN_COMPLETE`, `CLEAN_NO_REPORT`} — **or `POLICY_SENSITIVE` where criterion 7 is satisfied**.
+
+   *(Amended at S9, ADR-0013.* Read without the qualifier, criterion 7 is unreachable
+   and therefore not a criterion at all. A policy-sensitive action is policy-sensitive
+   because a sensitive path changed, and **approval does not un-modify the file** — the
+   verdict is still `POLICY_SENSITIVE` after the human grants. So criterion 6 refuses
+   first, every time, and every run criterion 7 could speak about is already rejected.
+   It also makes rows 12 and 13 vacuous in the other direction: "resumes on grant"
+   would resume a run that then refuses to complete no matter what the human said.
+   The reading that makes both criteria load-bearing is that criterion 6 excludes the
+   verdicts **nobody has resolved** — `CORRUPT`, `CONTRADICTED`, `OUT_OF_SCOPE`,
+   `NO_CHANGE`, and `POLICY_SENSITIVE` *without* a grant — and that an authorised
+   `POLICY_SENSITIVE` is resolved by criterion 7. Enforced in the type system: the
+   evidence variant carries the authorising grant as a required field, so "authorised"
+   cannot be claimed by a caller that has nothing to name.)*
 7. Every policy-sensitive action detected has a matching, unexpired, correctly-scoped grant.
 
 Note what is absent: **the agent's report.**
@@ -985,7 +999,8 @@ CORRUPT  >  CONTRADICTED  >  POLICY_SENSITIVE  >  OUT_OF_SCOPE
 **Layer 6 is the primary control**, not the fourth. *An agent with no push credential cannot push, regardless of what it types, what it is told, or whether any hook fires.* Concretely, the agent subprocess is spawned with:
 
 - An **allowlisted** environment (`PATH`, redirected `HOME`, `LANG`, `TERM`, the adapter's own auth variable, nothing else). Not a denylist — a denylist misses the next variable name.
-- `GIT_TERMINAL_PROMPT=0`; `GIT_ASKPASS` → a binary that always exits non-zero.
+- `GIT_TERMINAL_PROMPT=0`; `GIT_ASKPASS` → **a program Conductor writes itself**, into the per-run `HOME` at mode `0500`, which exits non-zero and prints nothing. *(Corrected at S9, ADR-0011: S5 pointed this at `/bin/false`, which **does not exist on macOS**. It failed safe only because `GIT_TERMINAL_PROMPT=0` caught the fallback — a named mechanism that was not present. Referencing a host path is what made that possible.)*
+- **`GIT_CONFIG_NOSYSTEM=1`**, with `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` pinned to `/dev/null`. *(Added at S9, ADR-0011.* A **system** gitconfig is located by absolute path, so it survives both `env_clear` and a redirected `HOME`. On a macOS host with Xcode's git it declares `credential.helper=osxkeychain` — a credential source reachable by an agent that adds its own remote, defeating layer 6 without touching a single environment variable. No item in the list above closes it.*)*
 - `SSH_AUTH_SOCK` unset; no `~/.netrc`; no `GH_TOKEN`/`GITHUB_TOKEN`; no cloud or database variables.
 - A **per-run `HOME`**, so `~/.aws`, `~/.config/gh`, `~/.kube` are simply absent.
 - A **per-run `TMPDIR` inside the workspace**, so ordinary temp usage stays contained despite M7.
@@ -1245,6 +1260,21 @@ is the authority, and these are the differences:
    strand every blocked run. Only `→ CANCELLED` / `→ SUPERSEDED` are permitted.
 4. **`AWAITING_APPROVAL` has no exit for a denial.** Added `→ AWAITING_REVIEW`.
    **S8 owns revisiting this** when denial semantics are actually built.
+5. **`READY → BLOCKED` is missing, and row 30 requires it** (found at S9, ADR-0012).
+   The edge is drawn as `READY ──claim+eligibility──► RUNNING`: two gates named, only
+   the both-pass outcome drawn. Row 30 says an ineligible task ends `BLOCKED` with the
+   attempt never started, and no path from `READY` reached `BLOCKED` — nor did one from
+   `RUNNING`. Added. `RUNNING → BLOCKED` was considered and **rejected**: the gate runs
+   before the claim, which keeps §4.8's "every exit from `RUNNING` passes through
+   reconciliation" literally true for a run that never launched an agent.
+6. **`AWAITING_APPROVAL → RECONCILING` is missing, and `(granted)` pointing at `READY`
+   is wrong** (found at S9, ADR-0012). `READY` re-runs the agent, and
+   `ensure_workspace` re-captures the baseline from a workspace that already holds the
+   approved change — so the next attempt reconciles as `NO_CHANGE` and **the approval
+   authorises nothing**. This is the same failure as correction 1, from the other
+   direction. `RECONCILING` is what works: the claim predicate already accepts and
+   preserves it, and §4.7's recovery compares against the **stored baseline artifact**.
+   `READY` is retained for denial and plan revision.
 
 **Changed from the baseline's 14 states:** `COMMITTING` removed (a commit is a Conductor-owned effect inside the `RECONCILING → COMPLETE` transaction, protected by the side-effect ledger; a state meaning "we are mid-effect" is what the ledger replaces, and having both means two mechanisms for one problem). `FAILED` removed (everything routes to `AWAITING_REVIEW` or `BLOCKED`; a terminal `FAILED` invites abandoning tasks with no decision record). `ABANDONED` removed (that is `CANCELLED` with a reason). `SUPERSEDED` added.
 
@@ -1877,7 +1907,17 @@ trivially. A positive control was added at review and proven to fail under that 
 **Why now.** No real agent runs before this exists.
 **Dependencies.** S2, S7.
 **Scope.** Env allowlist · per-run `HOME` · **per-run `TMPDIR` inside the workspace** · `GIT_ASKPASS` that fails · `SSH_AUTH_SOCK` unset · secret scanner · full post-run audit surface (§4.8) incl. **`/tmp` delta scanning** · findings that never auto-resolve · `SECURITY.md` populated with **measured** values.
-**Files.** `crates/conductor-run/src/enforce/{env,audit,secrets}.rs`, `SECURITY.md`.
+**Files.** `crates/conductor-run/src/enforce/{env,audit,launch,policy_gate}.rs`, `SECURITY.md`.
+
+*(**`enforce/secrets.rs` was not created**, and `launch.rs`/`policy_gate.rs` were not
+foreseen. S4 already built the scanner at `verify/secrets.rs`, with its detection
+rules, its redaction and — most importantly — its published `NOT_DETECTED` list; a
+second scanner would be a second answer to "is this text safe to show", and the two
+would drift. `audit` calls the existing one. The two extra files are the call sites
+this slice turned out to be about: `launch.rs` is §4.2's "before launching an
+attempt", `policy_gate.rs` is §4.8's "policy evaluation → approval or review". S9's
+work was never to re-decide anything — S7 and S8 had decided it — it was to make
+those decisions **reachable**, and a call site is where that lives.)*
 **Tests.** A fake agent attempting push, remote mutation, config edit, hook install, secret exfiltration, out-of-scope writes — each detected, each a finding · env allowlist asserted by dumping the child's environment and diffing against expected.
 **Verify.** Every §4.9 sensitive operation is either **prevented** (mechanism named) or **detected** (evidence named), classified per item in `SECURITY.md`. **No item may be listed as prevented without a passing test.**
 **Stop point.** The honesty table is complete and true.
@@ -2000,6 +2040,15 @@ Every row is a test. "Retry?" = an automatic agent attempt. "Human?" = execution
 | 30 | **Ineligible execution mode** | sensitive task, caps below requirement | attempt never starts | refuse with dimension named | no | **yes** | `BLOCKED` | *(decided at S7, **enforced at S9** — see note)* |
 
 Rows 14, 15, 22, 24, 26, 27, 28, 29, 30 are the ones that most distinguish this design.
+
+> **DISCHARGED AT S9.** The two notes below record why these four rows were held
+> at `NOT RUN` through S8. S9 wired every call site they name, and each row is now
+> scored from end-to-end evidence through `vertical::run_task` — never from unit
+> coverage. See `docs/reports/S9-completion-report.md` for the row-by-row
+> evidence, and ADR-0012 / ADR-0013 for the two state-machine defects that had to
+> be corrected before the rows were reachable at all. The notes are kept because
+> they are the reason the rows were not scored earlier, and deleting them would
+> erase the discipline that caught them.
 
 **Note on rows 12, 13, 25 — S8 built the mechanism, S9 wires the call site.**
 S8 proves approvals are durable, exactly scoped, expiring, revocable and not double-spendable

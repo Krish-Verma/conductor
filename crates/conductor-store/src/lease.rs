@@ -433,3 +433,137 @@ pub fn release_lease(conn: &mut Connection, fence: &Fence, now_ms: i64) -> Store
         Ok(())
     })
 }
+
+/// Refuse to launch a `READY` run whose measured execution capabilities do not
+/// meet its requirements — §4.2's gate, acceptance row 30.
+///
+/// **Unfenced, deliberately, and this is the only unfenced state write in the
+/// module.** A fence proves a worker still holds the lease it was given; a
+/// `READY` run has no lease and no owner, so there is no token to be stale
+/// against and demanding one would mean claiming the run first. Claiming it
+/// would move it to `RUNNING`, and §4.8's "every exit from `RUNNING` passes
+/// through reconciliation" is the invariant that makes an agent's self-report
+/// non-authoritative — a run that never launched an agent has nothing to
+/// reconcile, so putting it through `RUNNING` to reach `BLOCKED` would weaken a
+/// load-bearing statement in order to satisfy bookkeeping.
+///
+/// Concurrency is handled by the same mechanism the claim itself uses: the
+/// `WHERE state = 'READY'` clause. Exactly one caller can win, and a caller that
+/// loses sees `changed == 0` and is told the run was not `READY`, rather than
+/// blocking a run somebody else has already launched.
+///
+/// The finding and the state change are one transaction, because a run blocked
+/// with no recorded reason is a run nobody can act on, and a finding attached to
+/// a run that is still `READY` would be a refusal that did not refuse.
+pub fn refuse_ineligible_launch(
+    conn: &mut Connection,
+    run_id: &RunId,
+    finding_id: &str,
+    detail: &str,
+    now_ms: i64,
+) -> StoreResult<RunState> {
+    // §5.2's table is still consulted: this must be an edge the machine draws.
+    RunState::Ready
+        .as_task_state()
+        .transition_to(RunState::Blocked.as_task_state())
+        .map_err(|e| StoreError::IllegalTaskTransition(e.to_string()))?;
+
+    with_immediate(conn, |tx| {
+        let changed = tx.execute(
+            "UPDATE run SET state = 'BLOCKED' WHERE id = ?1 AND state = 'READY'",
+            params![run_id.as_str()],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotInState {
+                run_id: run_id.as_str().to_string(),
+                required: RunState::Ready,
+            });
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO finding
+               (id, run_id, kind, severity, evidence_ref, resolution, created_at)
+             VALUES (?1, ?2, 'INELIGIBLE_EXECUTION_MODE', 'CRITICAL', ?3, NULL, ?4)",
+            params![finding_id, run_id.as_str(), detail, now_ms],
+        )?;
+        append_event(
+            tx,
+            run_id,
+            EventKind::FindingRaised,
+            &format!(
+                "{{\"finding\":{},\"kind\":\"INELIGIBLE_EXECUTION_MODE\",\"severity\":\"CRITICAL\"}}",
+                serde_json::to_string(finding_id)?
+            ),
+            now_ms,
+        )?;
+        append_event(
+            tx,
+            run_id,
+            EventKind::RunStateChanged,
+            &format!(
+                "{{\"to\":\"BLOCKED\",\"route\":\"BLOCKED\",\"detail\":{}}}",
+                serde_json::to_string(detail)?
+            ),
+            now_ms,
+        )?;
+        Ok(RunState::Blocked)
+    })
+}
+
+/// Re-enter reconciliation after a human answered an approval request —
+/// acceptance rows 12 and 13's "resumes on grant".
+///
+/// **Unfenced, and guarded by state**, for the same reason as
+/// [`refuse_ineligible_launch`]: a run in `AWAITING_APPROVAL` has released its
+/// lease and is waiting for a person, so there is no lease-holder to fence
+/// against. `WHERE state = 'AWAITING_APPROVAL'` is the guard, and two operators
+/// answering the same request at the same moment produce one winner.
+///
+/// **`RECONCILING`, not `READY`.** `READY` means "an agent may be launched",
+/// and launching one would re-capture the baseline from a workspace that
+/// already contains the approved work — which reconciles as `NO_CHANGE` and
+/// discards exactly what the human authorised. `RECONCILING` rejoins §4.7's
+/// recovery path, which compares against the **stored baseline artifact**, so
+/// the approved change is still a change. See `conductor-core`'s legality table
+/// for the full argument.
+///
+/// This does **not** consume the grant. §4.3 is explicit that a grant is
+/// consumed "immediately before the side effect", and the side effect here is
+/// whatever the run does after it reconciles. The consumption happens at the
+/// policy gate on the way through, where the binding is recomputed — so a run
+/// resumed on a grant that has since been revoked does not proceed, which is
+/// what makes row 25 reachable.
+pub fn resume_after_grant(
+    conn: &mut Connection,
+    run_id: &RunId,
+    detail: &str,
+    now_ms: i64,
+) -> StoreResult<RunState> {
+    RunState::AwaitingApproval
+        .as_task_state()
+        .transition_to(RunState::Reconciling.as_task_state())
+        .map_err(|e| StoreError::IllegalTaskTransition(e.to_string()))?;
+
+    with_immediate(conn, |tx| {
+        let changed = tx.execute(
+            "UPDATE run SET state = 'RECONCILING' WHERE id = ?1 AND state = 'AWAITING_APPROVAL'",
+            params![run_id.as_str()],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotInState {
+                run_id: run_id.as_str().to_string(),
+                required: RunState::AwaitingApproval,
+            });
+        }
+        append_event(
+            tx,
+            run_id,
+            EventKind::RunStateChanged,
+            &format!(
+                "{{\"to\":\"RECONCILING\",\"route\":\"RECONCILING\",\"detail\":{}}}",
+                serde_json::to_string(detail)?
+            ),
+            now_ms,
+        )?;
+        Ok(RunState::Reconciling)
+    })
+}

@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::error::{StoreError, StoreResult};
 
 /// The highest schema version this binary understands.
-pub const SUPPORTED_SCHEMA_VERSION: i64 = 6;
+pub const SUPPORTED_SCHEMA_VERSION: i64 = 7;
 
 /// Pragmas as they are *set*, in application order.
 ///
@@ -490,4 +490,36 @@ CREATE INDEX ix_grant_binding ON approval_grant(binding_hash, state);
 -- `ix_attempt_in_flight` is.
 CREATE INDEX ix_request_pending ON approval_request(state, expires_at)
   WHERE state = 'REQUESTED';
+"#;
+
+/// Schema v7 — the execution requirements a task's launch is gated on.
+///
+/// §4.2 puts `execution_requirements` in `.conductor/project.yaml` "or a
+/// per-task override", and §4.2's gate runs "before launching an attempt".
+/// S11 owns `project.yaml`; until it exists, the only durable place a task's
+/// requirements can live is the task row — and durability is the whole point.
+///
+/// **Why not a field on `WorkerConfig`.** A requirement carried in the caller's
+/// configuration is a requirement the caller can forget, and a launch gate that
+/// depends on every call site remembering to populate it is not a gate. Reading
+/// it from the row the run already resolves means the refusal cannot be
+/// bypassed by constructing the config differently — including by a future
+/// slice that adds a second launch path.
+///
+/// Nullable, and `NULL` means **no requirement**, not "unknown". That is not
+/// the fail-closed default one might expect, and it is the correct one here:
+/// §4.2's gate is "if any *required* dimension exceeds the measured value,
+/// refuse", so a task that requires nothing is comparing an empty vector and
+/// proceeds. Defaulting instead to "everything must be `Hard`" would refuse
+/// every task on every host that has not been probed, which is not a safety
+/// property — it is an outage. The safety property lives one level down: for a
+/// task that *does* require a dimension, an absent or stale probe yields
+/// `fail_closed()` and the launch is refused.
+///
+/// The column holds §4.2's YAML block verbatim, e.g. `control_surface: hard`,
+/// parsed by `ExecutionRequirements::parse_yaml`. Storing the source text
+/// rather than a normalised encoding keeps the operator's words in the
+/// database, so an explanation can quote what was actually written.
+pub const SCHEMA_V7: &str = r#"
+ALTER TABLE task ADD COLUMN execution_requirements TEXT;
 "#;

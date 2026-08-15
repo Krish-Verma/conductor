@@ -62,6 +62,11 @@ fn drive(world: &World, scenario: &Path) -> conductor_run::vertical::Vertical {
         startup_grace: Duration::from_secs(30),
         sensitive: conductor_git::SensitivePatterns::default(),
         agent_env_extra: Default::default(),
+        // No `execution_requirements` on these fixtures' tasks, so §4.2's
+        // gate compares an empty vector and proceeds without a probe.
+        probe_key: conductor_run::containment::cache::ProbeKey::new(
+            "fake", "test", "none", "n/a", "unprobed",
+        ),
     };
     run_task(&mut store, &adapter, &config, &mut ()).expect("the vertical must not error")
 }

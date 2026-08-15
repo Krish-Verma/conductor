@@ -340,6 +340,14 @@ fn do_run(args: &RunArgs, shared: &StoreArgs) -> Result<ExitCode, Failure> {
         startup_grace: Duration::from_secs(30),
         sensitive: conductor_git::SensitivePatterns::default(),
         agent_env_extra: Default::default(),
+        // §4.2's gate reads this to find the measurement for this adapter on
+        // this machine. Built from the detected host rather than hardcoded, so
+        // an OS or CLI upgrade changes the key and a stale measurement stops
+        // being found — which is the whole reason the cache is keyed this way.
+        probe_key: conductor_run::enforce::launch::probe_key_for(
+            adapter.id(),
+            &conductor_run::containment::probe::Host::detect(),
+        ),
     };
 
     let result = run_task(&mut store, adapter.as_ref(), &config, &mut ())

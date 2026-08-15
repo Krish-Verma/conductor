@@ -98,6 +98,19 @@ fn main() {
         startup_grace: Duration::from_secs(30),
         sensitive: conductor_git::SensitivePatterns::default(),
         agent_env_extra: Default::default(),
+        // This harness kills Conductor at named integration points; the tasks
+        // it drives declare no `execution_requirements`, so §4.2's gate
+        // compares an empty vector and proceeds without consulting the cache.
+        // The key is still named honestly rather than left blank — if a future
+        // fixture *does* declare a requirement, this misses the cache and the
+        // launch is refused, which is the safe direction.
+        probe_key: conductor_run::containment::cache::ProbeKey::new(
+            "fake",
+            "s5-vertical",
+            "none",
+            "n/a",
+            "unprobed",
+        ),
     };
 
     let mut observer = KillAt {

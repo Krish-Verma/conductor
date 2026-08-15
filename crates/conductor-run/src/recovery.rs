@@ -38,7 +38,7 @@ use serde::Serialize;
 use crate::effects::{PreconditionAnswer, check_precondition};
 use crate::paths::ArtifactRoot;
 use crate::supervise::{Liveness, probe};
-use crate::worker::{WorkerError, route_for};
+use crate::worker::WorkerError;
 
 /// What recovery is allowed to do.
 #[derive(Debug, Clone)]
@@ -461,12 +461,18 @@ pub fn recover_one(
     // decides whether the run can move on.
     let verification_needed = !store.has_valid_verification(&observed.repo.tree_hash)?;
 
-    // Step 7. Classify and route.
-    let route = route_for(&reconciliation);
+    // Step 7. Classify and route — through the **same** function the attempt
+    // path uses (§4.8's policy consultation included). Recovery is also the
+    // path a run takes after a human answers an approval, so a policy check
+    // that lived only in the attempt path would never see the grant and the
+    // granted run would route straight back to `AWAITING_APPROVAL` forever.
+    let (route, detail, _request_id) =
+        crate::enforce::policy_gate::route_reconciliation(store, fence, &reconciliation, now_ms)
+            .map_err(|e| WorkerError::Adapter(format!("policy gate: {e}")))?;
     store.route_reconciled(
         fence,
         route.clone(),
-        &format!("recovered: verdict={}", reconciliation.verdict),
+        &format!("recovered: {detail}"),
         now_ms,
     )?;
     decisions.push(RecoveryDecision::Reconciled {
