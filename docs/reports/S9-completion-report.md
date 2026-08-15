@@ -321,7 +321,16 @@ reads and Conductor's inability to undo an effect.
 
 ## 14. Push / parity
 
-*(filled in at commit)*
+```
+commit       abb76f0  feat: S9 — the gates were decided, and nothing called them
+pushed       6afdd3d..abb76f0  main -> main
+local HEAD   abb76f0fe1ed72db766351ee64c9cc8b17b8ef8e
+origin/main  abb76f0fe1ed72db766351ee64c9cc8b17b8ef8e   (verified after a fresh fetch)
+working tree clean
+```
+
+Recorded in a follow-up rather than by amending: `abb76f0` is already on the
+remote, and rewriting published history is forbidden by CLAUDE.md.
 
 ---
 
