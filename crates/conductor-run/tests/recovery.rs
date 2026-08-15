@@ -313,13 +313,20 @@ fn step_9_expires_overdue_approvals_and_restores_the_rest() {
     store
         .conn()
         .execute(
+            // `kind` is schema v6's (S8). The third row is a plan approval,
+            // which §4.3 says does not expire: its `expires_at` is NULL, and
+            // `NULL < now` is NULL in SQLite, so it is never selected. That
+            // behaviour is load-bearing and invisible — nothing about the sweep
+            // announces it — so step 9 is where it gets asserted.
             "INSERT INTO approval_request
-               (id, run_id, action, facts, facts_source, policy_hash, matched_rules,
+               (id, kind, run_id, action, facts, facts_source, policy_hash, matched_rules,
                 explanation, evidence_ref, state, requested_at, expires_at)
-             VALUES ('ap-overdue', 'r-0041', 'dependency.add.runtime', '{}', 'reconciliation',
-                     ?1, '[]', 'x', NULL, 'REQUESTED', 0, ?2),
-                    ('ap-live', 'r-0041', 'dependency.add.runtime', '{}', 'reconciliation',
-                     ?1, '[]', 'x', NULL, 'REQUESTED', 0, ?3)",
+             VALUES ('ap-overdue', 'POLICY_APPROVAL', 'r-0041', 'dependency.add.runtime',
+                     '{}', 'reconciliation', ?1, '[]', 'x', NULL, 'REQUESTED', 0, ?2),
+                    ('ap-live', 'POLICY_APPROVAL', 'r-0041', 'dependency.add.runtime',
+                     '{}', 'reconciliation', ?1, '[]', 'x', NULL, 'REQUESTED', 0, ?3),
+                    ('ap-perpetual', 'PLAN_APPROVAL', NULL, 'architecture.change',
+                     '{}', 'reconciliation', ?1, '[]', 'x', NULL, 'REQUESTED', 0, NULL)",
             rusqlite::params![common::agent::POLICY_HASH, NOW - 1, NOW + 3_600_000],
         )
         .expect("seed approvals");
@@ -327,7 +334,13 @@ fn step_9_expires_overdue_approvals_and_restores_the_rest() {
     let report = recover(&mut store, &world.config(), NOW).expect("recover");
 
     assert_eq!(report.expired_approvals, vec!["ap-overdue".to_string()]);
-    assert_eq!(report.restored_waits, vec!["ap-live".to_string()]);
+    // Both the live one and the one that never expires are restored. A sweep
+    // that treated a NULL TTL as "already past" would silently expire every
+    // plan approval on the next daemon start.
+    assert_eq!(
+        report.restored_waits,
+        vec!["ap-live".to_string(), "ap-perpetual".to_string()]
+    );
 
     let states: Vec<(String, String)> = {
         let mut stmt = store
@@ -344,6 +357,7 @@ fn step_9_expires_overdue_approvals_and_restores_the_rest() {
         vec![
             ("ap-live".to_string(), "REQUESTED".to_string()),
             ("ap-overdue".to_string(), "EXPIRED".to_string()),
+            ("ap-perpetual".to_string(), "REQUESTED".to_string()),
         ],
         "a live approval's TTL must survive the restart (row 12)"
     );

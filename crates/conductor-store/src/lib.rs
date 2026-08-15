@@ -215,8 +215,9 @@ impl Store {
         run::expire_approvals(&mut self.conn, now_ms)
     }
 
-    /// Approval requests still waiting.
-    pub fn pending_approvals(&self) -> StoreResult<Vec<(String, RunId, i64)>> {
+    /// Approval requests still waiting. The run and the expiry are optional —
+    /// see [`run::pending_approvals`].
+    pub fn pending_approvals(&self) -> StoreResult<Vec<run::PendingApproval>> {
         run::pending_approvals(&self.conn)
     }
 

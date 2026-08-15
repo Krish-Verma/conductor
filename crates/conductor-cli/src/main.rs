@@ -2,11 +2,14 @@
 //!
 //! S1 shipped one command: `doctor`. S5 adds `task run|show|list` — §7.1's core
 //! verb and the two commands that read what it did. S7 adds `policy explain`,
-//! §7.1's "why was this denied — the 2 a.m. command". The rest of §7.1's
-//! thirteen arrive with the slices that implement them.
+//! §7.1's "why was this denied — the 2 a.m. command". S8 adds `approval
+//! list|show|approve|deny|revoke` over the control socket of §7.3. The rest of
+//! §7.1's thirteen arrive with the slices that implement them.
 
+mod approval;
 mod doctor;
 mod policy;
+mod socket;
 mod task;
 
 use std::process::ExitCode;
@@ -80,6 +83,16 @@ enum Commands {
         #[command(flatten)]
         shared: task::StoreArgs,
     },
+    /// List, inspect, grant, refuse and revoke approvals over the control
+    /// socket (§4.3, §7.3).
+    Approval {
+        #[command(subcommand)]
+        command: approval::ApprovalCommand,
+        #[command(flatten)]
+        shared: task::StoreArgs,
+        #[command(flatten)]
+        socket: approval::SocketArgs,
+    },
 }
 
 fn main() -> ExitCode {
@@ -99,6 +112,11 @@ fn main() -> ExitCode {
         Commands::Doctor(args) => run_doctor(&args),
         Commands::Task { command, shared } => task::run(&command, &shared),
         Commands::Policy { command, shared } => policy::run(&command, &shared),
+        Commands::Approval {
+            command,
+            shared,
+            socket,
+        } => approval::run(&command, &shared, &socket),
     }
 }
 

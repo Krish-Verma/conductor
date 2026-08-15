@@ -19,6 +19,34 @@ use conductor_run::containment::probe::{
     SubjectReport, probe_all, probe_subject,
 };
 
+/// Serializes the probes within this binary.
+///
+/// **Found at S8, and it is a harness defect rather than a product one.** Every
+/// test below drives the *real* host — spawning `codex`, entering seatbelt,
+/// binding unix sockets, planting files outside every permitted region — and
+/// several of them contend for those resources. Run concurrently under the load
+/// of the crate's other test binaries they intermittently report
+/// `Broken { "could not run the payload" }` and, in one case, a planted secret
+/// whose bytes are not the ones planted. Run with `--test-threads=1` all six
+/// pass, which is what identifies contention rather than a wrong measurement.
+///
+/// The direction of the flake matters and is why this was a defect worth fixing
+/// rather than tolerating: a contended probe fails **closed**, so it degrades to
+/// "unmeasured" and §4.2 then refuses to launch. Nothing unsafe was ever
+/// reported — but a gate that intermittently refuses is a gate people learn to
+/// re-run, and M29 already showed this host punishes parallel probe load.
+///
+/// A `Mutex` rather than a test-ordering crate because §2.2's dependency list is
+/// closed. Poisoning is ignored: a panicking test has already failed, and taking
+/// the lock afterwards is what lets the *rest* report honestly instead of
+/// cascading.
+static PROBE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Take [`PROBE_LOCK`] for the duration of one test.
+fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+    PROBE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn case(report: &SubjectReport, id: CaseId) -> &conductor_run::containment::probe::CaseReport {
     report
         .cases
@@ -29,6 +57,7 @@ fn case(report: &SubjectReport, id: CaseId) -> &conductor_run::containment::prob
 
 #[test]
 fn codex_sandbox_reproduces_the_measured_matrix() {
+    let _probe = exclusive();
     let host = Host::detect();
     let config = common::config();
     let subject = Subject::new(Adapter::Codex, Launcher::CodexSandbox);
@@ -135,6 +164,7 @@ fn codex_sandbox_reproduces_the_measured_matrix() {
 
 #[test]
 fn the_af_unix_denial_is_backed_by_its_positive_control() {
+    let _probe = exclusive();
     // The slice's named acceptance test. A control that does not connect means
     // the probe is broken, and the probe must say so rather than report a
     // denial — this is the failure that invalidated S0 round 1 (ADR-0002).
@@ -171,6 +201,7 @@ fn the_af_unix_denial_is_backed_by_its_positive_control() {
 
 #[test]
 fn the_bare_launcher_measures_that_nothing_is_enforced() {
+    let _probe = exclusive();
     // §4.2's "Claude Code (bare)" column is `None` across the board. That has to
     // be *observed* — a declared None is exactly what this slice exists to stop.
     let host = Host::detect();
@@ -216,6 +247,7 @@ fn the_bare_launcher_measures_that_nothing_is_enforced() {
 
 #[test]
 fn the_launcher_is_what_changes_the_outcome() {
+    let _probe = exclusive();
     // A permanent non-vacuity guard, in the spirit of ADR-0006's negative
     // control. If the probe were not really applying the launcher — wrong
     // argument order, a workspace that happens to be writable everywhere, a
@@ -257,6 +289,7 @@ fn the_launcher_is_what_changes_the_outcome() {
 
 #[test]
 fn the_fake_agent_is_not_probed_at_all() {
+    let _probe = exclusive();
     // §4.2: "FakeAgent is Conductor's own code and not an adversary; recording
     // it as Hard would be a category error."
     let host = Host::detect();
@@ -273,6 +306,7 @@ fn the_fake_agent_is_not_probed_at_all() {
 
 #[test]
 fn the_registry_covers_every_column_of_the_capability_table() {
+    let _probe = exclusive();
     let host = Host::detect();
     let config = common::config();
 

@@ -238,6 +238,11 @@ pub fn findings_for_run(conn: &Connection, run_id: &RunId) -> StoreResult<Vec<Fi
 /// Unfenced by design: an approval TTL is a property of the request, not of any
 /// worker's lease, and a run whose worker died must still have its approval
 /// expire. Returns the ids expired.
+///
+/// **A `NULL` `expires_at` never expires** (schema v6). SQLite gives that for
+/// free — `NULL < now` is `NULL`, so the row is not selected — and it is the
+/// behaviour §4.3 requires of a plan approval and a review acceptance, neither
+/// of which has a TTL. Stated because it is load-bearing and invisible.
 pub fn expire_approvals(conn: &mut Connection, now_ms: i64) -> StoreResult<Vec<String>> {
     with_immediate(conn, |tx| {
         let ids = {
@@ -260,7 +265,13 @@ pub fn expire_approvals(conn: &mut Connection, now_ms: i64) -> StoreResult<Vec<S
 
 /// Approval requests still waiting — §4.7 step 9's "restore `AWAITING_APPROVAL`
 /// waits".
-pub fn pending_approvals(conn: &Connection) -> StoreResult<Vec<(String, RunId, i64)>> {
+///
+/// Both the run and the expiry are optional after schema v6: §4.3's plan
+/// approval authorizes a *plan version* and its review acceptance a *review
+/// packet*, so neither is run-scoped, and neither expires. Recovery reads only
+/// the id; the two `Option`s are here so that a row it cannot attribute to a
+/// run is still *restored* rather than silently dropped by a failed conversion.
+pub fn pending_approvals(conn: &Connection) -> StoreResult<Vec<PendingApproval>> {
     let mut stmt = conn.prepare(
         "SELECT id, run_id, expires_at FROM approval_request
           WHERE state = 'REQUESTED' ORDER BY requested_at, id",
@@ -268,13 +279,32 @@ pub fn pending_approvals(conn: &Connection) -> StoreResult<Vec<(String, RunId, i
     let mut rows = stmt.query([])?;
     let mut out = Vec::new();
     while let Some(row) = rows.next()? {
-        out.push((
-            row.get::<_, String>(0)?,
-            RunId::new(row.get::<_, String>(1)?)?,
-            row.get::<_, i64>(2)?,
-        ));
+        out.push(PendingApproval {
+            id: row.get::<_, String>(0)?,
+            run_id: row
+                .get::<_, Option<String>>(1)?
+                .map(RunId::new)
+                .transpose()?,
+            expires_at: row.get::<_, Option<i64>>(2)?,
+        });
     }
     Ok(out)
+}
+
+/// One approval request still waiting — §4.7 step 9.
+///
+/// A named row rather than a tuple because two of its three fields are
+/// `Option`, and `(String, Option<RunId>, Option<i64>)` at a call site says
+/// nothing about which absence means what.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingApproval {
+    /// `approval_request.id`.
+    pub id: String,
+    /// The run it belongs to — `None` for a plan approval, which authorizes a
+    /// plan version rather than any run (§4.3).
+    pub run_id: Option<RunId>,
+    /// When it expires — `None` for the two kinds §4.3 gives no TTL.
+    pub expires_at: Option<i64>,
 }
 
 /// Whether a verification result already exists for this tree (§4.7 step 6:

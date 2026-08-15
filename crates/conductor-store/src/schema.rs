@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::error::{StoreError, StoreResult};
 
 /// The highest schema version this binary understands.
-pub const SUPPORTED_SCHEMA_VERSION: i64 = 5;
+pub const SUPPORTED_SCHEMA_VERSION: i64 = 6;
 
 /// Pragmas as they are *set*, in application order.
 ///
@@ -386,4 +386,108 @@ CREATE TABLE repair_observation (
   recorded_at    INTEGER NOT NULL,
   UNIQUE(run_id, ordinal)
 );
+"#;
+
+/// Schema v6 — the approval tables can hold §4.3's **four** kinds.
+///
+/// # What v1 could not express
+///
+/// §4.3 lines 569-578 name four approval kinds and say they must **never**
+/// collapse into `approved: bool`, "because collapsing them would let a plan
+/// approval satisfy a deployment gate". Part 5.1's tables cannot hold four
+/// kinds. Three specific mismatches, each found by trying to write the row:
+///
+/// | §4.3 says | v1 says | consequence |
+/// |---|---|---|
+/// | four kinds, never collapsed | no `kind` column | the kinds *are* collapsed — every row reads as the one kind v1's other columns describe |
+/// | a plan approval authorizes a **plan version**; a review acceptance authorizes a **review packet** | `run_id TEXT NOT NULL REFERENCES run(id)` | neither is run-scoped, so recording one means inventing a run |
+/// | plan approval and review acceptance **do not expire** | `expires_at INTEGER NOT NULL` on both tables | a perpetual approval must be given a fabricated TTL, and would then silently lapse |
+///
+/// v1's shape is exactly §4.3's *worked example*, which is a policy approval.
+/// The other three kinds were specified in prose and never given a row.
+///
+/// # What v6 changes, and nothing more
+///
+/// * `kind` — which of the four. `NOT NULL`, no default on the new table:
+///   every writer must say. Pre-existing rows are migrated to
+///   `POLICY_APPROVAL`, the only kind v1's columns could have meant.
+/// * `subject` — what is authorized when it is not a run: a plan version id, a
+///   review packet id, a rule id. Nullable, because a policy approval's subject
+///   is already in `action` + `facts`.
+/// * `run_id` — nullable. A plan approval has no run, and inventing one would
+///   be a lie the schema tells every later reader (ADR-0007's reasoning about
+///   the `sha256` column, applied to a foreign key).
+/// * `expires_at` — nullable on **both** tables. `NULL` means "does not
+///   expire", which is a distinct fact from any timestamp. A sentinel far in
+///   the future was rejected: it would make every expiry query read as if the
+///   approval expires, and one arithmetic slip away from expiring an
+///   authoritative plan.
+/// * `resolved_at` on the grant — when it left `GRANTED`. Mirrors
+///   `side_effect.resolved_at`, which exists for the same reason: an audit
+///   reading a terminal row needs to know *when* without joining the event log.
+///
+/// Deliberately **not** added: a `kind` column on `approval_grant`. A grant's
+/// kind is its request's kind, and denormalizing it would create a second
+/// source of truth that can disagree — the hazard schema v5 records about
+/// `repair_observation.fingerprint`.
+///
+/// # Why this is a table rebuild
+///
+/// SQLite's `ALTER TABLE` cannot drop `NOT NULL`, so the two columns that must
+/// become nullable force the copy-and-swap. `approval_grant` is rebuilt as well
+/// because a rename rewrites the foreign keys that point at the renamed table:
+/// measured, not assumed — renaming `approval_request` alone leaves
+/// `approval_grant` referencing `"approval_request_v1"`. Dropping the old grant
+/// table before the old request table keeps `PRAGMA foreign_keys = ON`
+/// satisfied throughout, and the migration harness runs
+/// `PRAGMA integrity_check` after the commit.
+pub const SCHEMA_V6: &str = r#"
+CREATE TABLE approval_request_v6 (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,                         -- PLAN_APPROVAL|POLICY_APPROVAL|POLICY_EXCEPTION|REVIEW_ACCEPTANCE
+  subject TEXT,                               -- plan version, review packet or rule; NULL for a policy approval
+  run_id TEXT REFERENCES run(id),             -- NULL: a plan approval has no run
+  action TEXT NOT NULL, facts TEXT NOT NULL, facts_source TEXT NOT NULL,
+  policy_hash TEXT NOT NULL, matched_rules TEXT NOT NULL, explanation TEXT NOT NULL,
+  evidence_ref TEXT, state TEXT NOT NULL,     -- REQUESTED|GRANTED|DENIED|EXPIRED
+  requested_at INTEGER NOT NULL, expires_at INTEGER   -- NULL: does not expire
+);
+
+INSERT INTO approval_request_v6
+  (id, kind, subject, run_id, action, facts, facts_source, policy_hash,
+   matched_rules, explanation, evidence_ref, state, requested_at, expires_at)
+  SELECT id, 'POLICY_APPROVAL', NULL, run_id, action, facts, facts_source,
+         policy_hash, matched_rules, explanation, evidence_ref, state,
+         requested_at, expires_at
+    FROM approval_request;
+
+CREATE TABLE approval_grant_v6 (
+  id TEXT PRIMARY KEY, request_id TEXT NOT NULL REFERENCES approval_request_v6(id),
+  binding_hash TEXT NOT NULL, scope TEXT NOT NULL, reuse INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL,                        -- GRANTED|CONSUMED|EXPIRED|REVOKED
+  nonce_hash TEXT, channel TEXT NOT NULL,
+  granted_by TEXT NOT NULL, granted_at INTEGER NOT NULL,
+  expires_at INTEGER,                         -- NULL: does not expire
+  resolved_at INTEGER                         -- when it left GRANTED
+);
+
+INSERT INTO approval_grant_v6
+  (id, request_id, binding_hash, scope, reuse, state, nonce_hash, channel,
+   granted_by, granted_at, expires_at, resolved_at)
+  SELECT id, request_id, binding_hash, scope, reuse, state, nonce_hash, channel,
+         granted_by, granted_at, expires_at, NULL
+    FROM approval_grant;
+
+DROP TABLE approval_grant;
+DROP TABLE approval_request;
+ALTER TABLE approval_request_v6 RENAME TO approval_request;
+ALTER TABLE approval_grant_v6 RENAME TO approval_grant;
+
+CREATE INDEX ix_grant_binding ON approval_grant(binding_hash, state);
+-- §4.7 step 9 sweeps expired requests on every start, and the socket lists
+-- pending ones. Both range over the tiny non-terminal set while the terminal
+-- set grows without bound, so the index is partial for the same reason
+-- `ix_attempt_in_flight` is.
+CREATE INDEX ix_request_pending ON approval_request(state, expires_at)
+  WHERE state = 'REQUESTED';
 "#;

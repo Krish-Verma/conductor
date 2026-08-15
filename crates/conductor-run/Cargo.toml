@@ -35,6 +35,16 @@ path = "src/bin/conductor-s4-verifier.rs"
 name = "conductor-s5-vertical"
 path = "src/bin/conductor-s5-vertical.rs"
 
+[[bin]]
+# S8's kill-restart cycle. The slice's Verify line asks for approval state to
+# survive 50 kill-restart cycles, and a "restart" that is really two `Store`
+# handles in one process proves that `open_existing` works, not that anything is
+# durable. A `SIGKILL` cannot be caught, so this process leaves the database in
+# the state a power cut would. Same reason S3, S4 and S5 each needed their own
+# binary.
+name = "conductor-s8-approval-victim"
+path = "src/bin/conductor-s8-approval-victim.rs"
+
 [dependencies]
 # §3.4's `Conductor-Verification` trailer is a blake3 digest over the
 # evidence the completion gate read (ADR-0007: blake3 is the only digest).

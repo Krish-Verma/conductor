@@ -213,7 +213,7 @@ pub fn recover(
     let restored_waits = store
         .pending_approvals()?
         .into_iter()
-        .map(|(id, _, _)| id)
+        .map(|pending| pending.id)
         .collect();
 
     Ok(RecoveryReport {

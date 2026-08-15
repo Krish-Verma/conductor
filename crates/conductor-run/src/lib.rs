@@ -11,6 +11,7 @@
 //! Approvals (S8), enforcement (S9) and packets (S12) belong to the slices that
 //! own them and are deliberately absent.
 
+pub mod approval;
 pub mod containment;
 pub mod effects;
 pub mod lease;

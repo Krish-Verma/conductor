@@ -527,6 +527,22 @@ before launching an attempt:
 
 **Additional control, all tiers:** the binary reachable from a workspace, if any, exposes read-only verbs only and physically lacks the approval code path — asserted by a source-scan test that fails if anyone wires approval into it.
 
+> **RESOLVED at S8 — "if any" is the accurate half; there is no shim in v1.** §4.3
+> hedges ("the binary reachable from a workspace, *if any*") while the S8 slice's
+> Verify line says "**the** shim" as though one exists. Nothing in v1 is a shim.
+> What *is* reachable from a workspace is the pair of binaries Conductor runs **in
+> the agent's position**: `conductor-fake-agent` (it is the agent; its cwd is the
+> workspace) and `conductor-probe-action` (§4.2's payload, run under the launcher
+> being measured). Those two are the census the source scan governs.
+>
+> Absence is proven three ways rather than one, because a substring scan alone is
+> a rule someone renames their way past: a code-shaped needle scan; a rule that no
+> workspace-facing binary may name `conductor_run` or `conductor_store` **at all**
+> (§4.3's "read-only verbs only", with no subset to get wrong); and a manifest
+> rule that `conductor-agent` must not depend on `conductor-run`. The census
+> itself is guarded — an unclassified binary fails the suite, which is how the
+> guard caught S8's own new test binary.
+
 **Request and grant:**
 
 ```yaml
@@ -1813,7 +1829,35 @@ then fails.
 
 ---
 
-### S8 — Approvals
+### S8 — Approvals  ✅ **DONE**
+
+**Outcome.** The four kinds kept structurally distinct, `binding_hash` recomputed at use
+time, TTL and one-shot enforcement, revocation with a defined outcome in each of four
+states, a `0600` control socket published without a permissive window, and the §4.3 source
+scan. 38 new tests (**766 total**). Report: `docs/reports/S8-completion-report.md`.
+
+**The socket is published by `rename(2)`, not by `chmod(2)`.** Bind-then-chmod leaves a
+window in which the published name exists at the umask's mode. Instead the listener binds
+at a private per-pid staging name inside a directory `mkdir(2)` itself creates `0700`, is
+chmod'ed `0600` while nothing can name it, then atomically renamed onto `conductor.sock`.
+Stale-vs-live is decided by **attempting to connect**, never by guessing: a refused connect
+means the name is free (a crash must not make approvals permanently unreachable);
+a successful one returns `AlreadyServing` rather than stealing the name from a live server.
+Deletion while running is detected by `(dev, ino)` identity, so replacement reads the same
+as removal.
+
+**Ships at tier C on this host, and says so.** `serve` prints §4.3's integrity sentence
+verbatim, including "**Not a boundary. Approvals are advisory.**" It never claims tier A
+and structurally cannot: tier A is a *measured* `control_surface: Hard` acted on by §4.2's
+eligibility check, not something this code can assert about itself.
+
+**Two vacuous tests were found by mutation, one of them minutes old.** Mutating the socket
+mode killed no unit test, because three assertions compared the observed mode against the
+constant they were testing — the code agreeing with itself. They now assert §7.3's literal
+`0o600`/`0o700`. Separately, an audit mutation making `authorize` refuse everything left
+`the_binding_is_recomputed_at_use_time_and_not_read_back_from_the_row` **passing**: it
+asserted only a refusal, which a function that never authorizes anything satisfies
+trivially. A positive control was added at review and proven to fail under that mutation.
 
 **Objective.** Durable, exactly-scoped, expiring approvals over a socket the agent cannot reach.
 **Dependencies.** S7.
@@ -1956,6 +2000,17 @@ Every row is a test. "Retry?" = an automatic agent attempt. "Human?" = execution
 | 30 | **Ineligible execution mode** | sensitive task, caps below requirement | attempt never starts | refuse with dimension named | no | **yes** | `BLOCKED` | *(decided at S7, **enforced at S9** — see note)* |
 
 Rows 14, 15, 22, 24, 26, 27, 28, 29, 30 are the ones that most distinguish this design.
+
+**Note on rows 12, 13, 25 — S8 built the mechanism, S9 wires the call site.**
+S8 proves approvals are durable, exactly scoped, expiring, revocable and not double-spendable
+— including across 50 real `SIGKILL` cycles. What it does **not** do is turn a
+`require_approval` decision into an `approval_request` from inside a run: nothing in the run
+path creates one, because that is enforcement and S9 owns it. Therefore, for the v1 sweep:
+**row 13 is `NOT RUN`**; **row 12 is half enforced** (TTL and `REQUESTED` survive restart —
+proven; "resumes on grant" — not reachable); **row 25 is mechanism-only** (all four
+revocation outcomes tested, but no real run reaches revocation). Scoring any of these `PASS`
+on the strength of the unit coverage would be exactly the "a similarly named test exists"
+error the sweep forbids.
 
 **Note on row 30 — decided at S7, NOT YET ENFORCED (S9 owns the call site).**
 S7 implements `eligibility::check` as a pure function — requirements vs measured

@@ -39,6 +39,27 @@ fn config() -> SupervisorConfig {
     }
 }
 
+/// Budgets for a test that is **not** measuring a timeout.
+///
+/// S3 established the rule and this test was left outside it: *"the product was
+/// right and the test was wrong. Budgets are now separated by what the test is
+/// measuring."* [`config`]'s 600 ms idle budget exists so the idle-timeout tests
+/// can assert quickly. A test asserting the *happy path* inherits nothing from
+/// that number except a race — under the parallel load of the crate's other test
+/// binaries the fake agent's inter-line gap can exceed 600 ms, the supervisor
+/// correctly kills it, and the assertion on `Exited { code: 0 }` fails. That is
+/// the supervisor being right and the harness being wrong, which is the one
+/// failure mode M29 keeps producing on this host.
+///
+/// Found flaky at S8, at roughly one full-suite run in three.
+fn completing() -> SupervisorConfig {
+    SupervisorConfig {
+        idle_timeout: Duration::from_secs(30),
+        wall_timeout: Duration::from_secs(60),
+        ..config()
+    }
+}
+
 #[test]
 fn a_successful_agent_is_spawned_streamed_and_reaped() {
     warm_the_binary();
@@ -53,7 +74,7 @@ fn a_successful_agent_is_spawned_streamed_and_reaped() {
     assert!(pid > 0);
     assert!(matches!(agent.liveness(), Liveness::Alive(_)));
 
-    let supervised = agent.supervise(&adapter, &config(), |_| {});
+    let supervised = agent.supervise(&adapter, &completing(), |_| {});
 
     assert!(matches!(supervised.end, SupervisionEnd::Exited { code: 0 }));
     assert_eq!(supervised.pid, Some(pid));
