@@ -133,7 +133,17 @@ and demands identical bytes.
 | `cargo fmt --all --check` | clean |
 | `cargo clippy --all-targets --all-features -- -D warnings` | exit 0, zero warnings |
 | `cargo test -p conductor-run --test packet` | 11 / 11 |
-| `cargo test --all --no-fail-fast` | see the commit that closes this branch |
+| `cargo test --all --no-fail-fast` | exit 0 — **95 suites, 1139 passed, 0 failed, 3 ignored**, 0 panics |
+
+The gate was run twice. The first attempt was **killed** at 19 suites when its
+wrapper process was terminated, and a monitor watching for the process to
+disappear reported it as finished. That is the process-attribution error this
+project has hit before, and 19 suites / 185 tests was **not** recorded as a
+passing gate. The second run was detached with `nohup` so a wrapper kill could
+not take it down, and it is the one reported above — confirmed complete by its
+tail (`Doc-tests conductor_store`, cargo's last step; a killed run ends
+mid-`Running`) and by arithmetic against S11's gate: exactly +1 suite
+(`tests/packet.rs`) and +15 tests (11 integration + 4 unit).
 
 ---
 
