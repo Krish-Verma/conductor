@@ -203,6 +203,33 @@ pub struct Task {
     /// What "done" means, and what proves each part of it.
     #[serde(default)]
     pub acceptance_criteria: Vec<AcceptanceCriterion>,
+    /// Decision ids (`D-0007`) whose argument this task needs — §6.5's
+    /// *"explicit refs"*.
+    ///
+    /// # Why this field exists, and why the other half of §6.5's sentence does
+    /// not
+    ///
+    /// §6.5 says a packet carries decisions *"selected by touching the task's
+    /// scope globs **or explicit refs** — never 'all accepted decisions'"*, and
+    /// names two mechanisms. Only this one is implementable: matching a
+    /// decision against a task's scope globs requires the **decision** to
+    /// declare a scope, and §3.6 fixes a decision's frontmatter at four fields
+    /// (`id`, `status`, `supersedes`, `date`) with `deny_unknown_fields`, on the
+    /// reasoning that *"an unknown key here is not tomorrow's feature"*. Adding
+    /// `scope:` there would contradict §3.6 **and** change every existing
+    /// decision's content-hash preimage.
+    ///
+    /// So the reference points the other way: the plan — which already tolerates
+    /// unknown keys, and which a human writes and approves — names the decisions
+    /// a task needs. See ADR-0016.
+    ///
+    /// Plain strings rather than a validated id type, for
+    /// [`Task::actions`]'s reason: whether an id resolves is a question about a
+    /// *set of documents*, not about this struct, and the packet builder is what
+    /// has both halves. A reference to a decision nothing defines is refused
+    /// there, fail-closed, rather than silently dropped from the packet.
+    #[serde(default)]
+    pub decisions: Vec<String>,
     /// The actions this task is authorized to perform, named with §4.4's
     /// taxonomy strings.
     ///

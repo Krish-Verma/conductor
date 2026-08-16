@@ -1565,6 +1565,8 @@ report_schema: schemas/agent-report.v1.json
 
 **Context minimization:** decisions selected by touching the task's scope globs or explicit refs — never "all accepted decisions." Prior diffs linked by path and hash. Verification logs never embedded; failing *excerpts* only (§6.6).
 
+> **Only "explicit refs" is implemented, and that is a decision rather than a gap — S12, ADR-0016.** Matching a decision against a task's scope globs requires the *decision* to declare a scope, and §3.6 fixes decision frontmatter at four fields under `deny_unknown_fields` (*"an unknown key here is not tomorrow's feature"*); adding `scope:` there would contradict §3.6 **and** change the content-hash preimage of every decision already written. A plan document has no `deny_unknown_fields`, so the reference points the other way: `plan.yaml`'s task gains `decisions: [D-0007]`. That direction is also better on its merits — a decision cannot know which future task will need it, and the person writing the task can. A reference that does not resolve is a **refusal** naming both ids, never a silent omission: a well-formed packet missing an argument the plan says the task needs is the failure nobody would see.
+
 **Agent report** (schema-enforced via `--output-schema` / `--json-schema`):
 
 ```json

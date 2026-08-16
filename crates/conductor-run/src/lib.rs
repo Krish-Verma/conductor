@@ -17,6 +17,7 @@ pub mod decision;
 pub mod effects;
 pub mod enforce;
 pub mod lease;
+pub mod packet;
 pub mod paths;
 pub mod plan;
 pub mod policy;
