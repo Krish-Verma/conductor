@@ -138,7 +138,8 @@ pub struct Supervised {
     pub end: SupervisionEnd,
     /// The child's pid.
     pub pid: Option<i32>,
-    /// The child's start time, microseconds since the epoch.
+    /// The child's start time, microseconds since the epoch, or `None` when it
+    /// could not be read at spawn — an absence, never a `0`.
     pub pid_start_time: Option<i64>,
     /// Every stdout line, in order.
     pub stdout_lines: Vec<String>,
@@ -213,6 +214,20 @@ pub enum Liveness {
         /// The start time the live process actually has.
         actual_start: i64,
     },
+    /// A process with that pid exists, and there is **no recorded identity** to
+    /// check it against.
+    ///
+    /// Distinct from [`Liveness::Recycled`] on purpose: `Recycled` is a proof
+    /// that the live process is somebody else's, this is the admission that
+    /// nothing can be proved either way. The two lead to the same action —
+    /// neither is adoptable — but only one of them is an observation, and §5.2
+    /// forbids recording the unknown as known.
+    Unidentified {
+        /// The start time the live process actually has. Evidence for the
+        /// operator, never grounds for adoption: a start time read *now* says
+        /// nothing about the process that was recorded *then*.
+        actual_start: i64,
+    },
 }
 
 /// A process's start time in microseconds since the epoch, or `None` if there is
@@ -244,22 +259,35 @@ pub fn start_time_us(pid: i32) -> Option<i64> {
 /// >     alive → adopt or terminate (config); record.
 /// >     dead  → attempt := STALE.
 ///
-/// Pass `expected_start_time = 0` to ask only whether *anything* is there. Any
-/// other value is checked, because a pid on its own is not an identity: pids are
-/// recycled, and adopting a stranger's process is worse than adopting nothing.
-pub fn probe(pid: i32, expected_start_time: i64) -> Liveness {
+/// `expected_start_time` is `None` when no identity was ever established for
+/// this pid. That answers [`Liveness::Unidentified`], never [`Liveness::Alive`]:
+/// a pid on its own is not an identity — pids are recycled, and adopting a
+/// stranger's process is worse than adopting nothing.
+///
+/// **There is no wildcard.** Until this fix, `expected_start_time = 0` meant
+/// "ask only whether *anything* is there", which made `0` do two jobs: a real
+/// comparand and a request to skip the comparison. `spawn` recorded `0` when it
+/// could not read a start time, so the second job silently claimed the first —
+/// a stored `0` reaching this function asked it to adopt whatever now held the
+/// pid. Callers that genuinely want "is anything there?" ask
+/// [`start_time_us`] directly, which is the question they actually mean.
+pub fn probe(pid: i32, expected_start_time: Option<i64>) -> Liveness {
     let Some(actual) = start_time_us(pid) else {
+        // Nothing holds the pid, so nothing of ours is running under it. That
+        // much is provable without an identity.
         return Liveness::Dead;
     };
-    if expected_start_time == 0 || actual == expected_start_time {
-        Liveness::Alive(ChildAlive {
+    match expected_start_time {
+        Some(expected) if expected == actual => Liveness::Alive(ChildAlive {
             pid,
             start_time_us: actual,
-        })
-    } else {
-        Liveness::Recycled {
+        }),
+        Some(_) => Liveness::Recycled {
             actual_start: actual,
-        }
+        },
+        None => Liveness::Unidentified {
+            actual_start: actual,
+        },
     }
 }
 
@@ -277,7 +305,10 @@ enum StreamMessage {
 pub struct SpawnedAgent {
     child: Child,
     pid: i32,
-    pid_start_time: i64,
+    /// `None` when the start time could not be read at spawn. Kept as an absence
+    /// rather than a sentinel so that nothing downstream can mistake it for a
+    /// process identity — see [`spawn`].
+    pid_start_time: Option<i64>,
     spawned_at: Instant,
     stdout_rx: Option<Receiver<StreamMessage>>,
     stderr_rx: Option<Receiver<StreamMessage>>,
@@ -321,7 +352,15 @@ pub fn spawn(command: &AgentCommand) -> std::io::Result<SpawnedAgent> {
     // Read the start time immediately: it is the half of the process identity
     // that survives pid reuse, and it must be captured while the child is
     // certainly alive.
-    let pid_start_time = start_time_us(pid).unwrap_or(0);
+    //
+    // **If it cannot be read, it stays unread.** This was `unwrap_or(0)`, which
+    // converted "the identity could not be established" into "do not check the
+    // identity" — `0` was `probe`'s wildcard, and the value is persisted to
+    // `attempt.pid_start_time` and read back by §4.7 step 3, so a single failed
+    // syscall here made recovery adopt whatever process later occupied the pid.
+    // A fail-open in the identity check is worse than no identity check, because
+    // it looks like one.
+    let pid_start_time = start_time_us(pid);
 
     let mut readers = Vec::new();
     let (stdout_tx, stdout_rx) = channel();
@@ -374,8 +413,9 @@ impl SpawnedAgent {
         self.pid
     }
 
-    /// The child's start time, microseconds since the epoch.
-    pub fn pid_start_time(&self) -> i64 {
+    /// The child's start time, microseconds since the epoch, or `None` when the
+    /// kernel would not say at spawn.
+    pub fn pid_start_time(&self) -> Option<i64> {
         self.pid_start_time
     }
 
@@ -385,6 +425,22 @@ impl SpawnedAgent {
     }
 
     /// Whether the child — that exact process — is still there.
+    ///
+    /// When the start time could not be read at spawn this answers
+    /// [`Liveness::Unidentified`] for as long as something holds the pid, and
+    /// [`Liveness::Dead`] once nothing does.
+    ///
+    /// **Never `Alive`.** `Alive` carries a [`ChildAlive`], and that witness is
+    /// the token [`crate::lease::heartbeat`] demands as proof that the process
+    /// being heartbeated for exists — §4.7: "a supervisor that heartbeats while
+    /// its child is dead is worse than one that crashes". Handing out a witness
+    /// for a process nothing identified would make the witness a formality. The
+    /// rejected alternative was `Dead`, which is cheaper for callers and is a
+    /// claim we cannot support: the child is very likely running, and inventing
+    /// its death is the same category of error in the other direction. The
+    /// consequence is deliberate — an agent whose identity was never established
+    /// gets no heartbeats, its lease lapses, and recovery deals with it — because
+    /// a lapsed lease is recoverable and a false identity is not.
     pub fn liveness(&self) -> Liveness {
         probe(self.pid, self.pid_start_time)
     }
@@ -498,10 +554,13 @@ impl SpawnedAgent {
                 }
             }
 
-            let alive = match probe(self.pid, self.pid_start_time) {
+            let alive = match self.liveness() {
                 Liveness::Alive(witness) => Some(witness),
                 // Alive-but-recycled is impossible for a child we hold, and
                 // dead-but-not-reaped is a zombie awaiting `try_wait` above.
+                // `Unidentified` means the spawn never established an identity:
+                // there is no witness to give, so this loop supervises the child
+                // normally — it owns the handle — but nothing heartbeats.
                 _ => None,
             };
             if let Some(witness) = &alive {
@@ -534,7 +593,12 @@ impl SpawnedAgent {
             // asks for: unknown must not be recorded as known, and *known must
             // not be discarded as unknown either*. The wait cannot hang: the
             // pipe is at EOF and the process is unrunnable.
-            if stdout_done && matches!(probe(self.pid, self.pid_start_time), Liveness::Dead) {
+            //
+            // `Dead` here does not depend on the recorded identity: `probe`
+            // answers it whenever nothing holds the pid at all, which is the
+            // only fact this branch needs. So an agent whose start time could
+            // not be read still reaches its exit status by this path.
+            if stdout_done && matches!(self.liveness(), Liveness::Dead) {
                 match self.child.wait() {
                     Ok(status) => {
                         self.reaped = true;
@@ -706,7 +770,7 @@ impl SpawnedAgent {
         Supervised {
             end,
             pid: Some(self.pid),
-            pid_start_time: Some(self.pid_start_time),
+            pid_start_time: self.pid_start_time,
             stdout_lines,
             stderr: stderr_lines.join("\n"),
             events,

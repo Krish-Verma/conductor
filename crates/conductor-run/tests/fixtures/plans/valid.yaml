@@ -1,0 +1,51 @@
+# The positive control.
+#
+# A validator that refuses everything passes every rejection test in this file's
+# neighbourhood, so this fixture exists to make that failure visible: it is a
+# complete, well-formed plan and `validate` must accept it. Every rejection
+# fixture in this directory is this plan with exactly one defect introduced, so
+# a test that fails here and nowhere else has found a real over-refusal.
+#
+# No criterion here is `manual: true` — a validated copy of this plan must
+# report `requires_human_review() == false`, which is what makes the
+# `manual_criterion.yaml` fixture's opposite answer mean something.
+plan:
+  id: p-fixture
+  version: 3
+  objective: "Prove that the S11 plan core accepts a well-formed plan."
+  milestones:
+    - id: M-01
+      title: "Plan core"
+      slices:
+        - id: S-11
+          title: "Plan ledger"
+          tasks:
+            - id: T-0001
+              objective: "Model the plan document."
+              rationale: "Nothing downstream can be checked until the shape exists."
+              depends_on: []
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              attempt_budget: 3
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "The model deserialises the fixture plans."
+                  verified_by: [unit-tests]
+            - id: T-0002
+              objective: "Validate the plan document."
+              rationale: "An unbound criterion is how a task completes on an agent's word."
+              depends_on: [T-0001]
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              attempt_budget: 3
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "Every refusal names the offending id."
+                  verified_by: [unit-tests, typecheck]
+                - id: AC-2
+                  statement: "No secret reaches the validation report."
+                  verified_by: [no-secrets]

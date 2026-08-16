@@ -243,6 +243,11 @@ pub fn record_attempt_starting(
 }
 
 /// `STARTING → ACTIVE`, recording the process identity recovery will probe.
+///
+/// A start time the supervisor could not read is written as `NULL`. §4.7 step 3
+/// asks "alive **and** start-time matches?", and a column that cannot say "I do
+/// not know" forces the answer to be a lie in one direction or the other — the
+/// direction a sentinel picks is "adopt whatever holds the pid".
 pub fn record_attempt_active(
     conn: &mut Connection,
     fence: &Fence,
@@ -272,7 +277,7 @@ pub fn record_attempt_active(
                 "{{\"attempt\":\"{}\",\"pid\":{},\"pid_start_time\":{}}}",
                 attempt.id(),
                 spawn.pid,
-                spawn.pid_start_time
+                json_opt_i64(spawn.pid_start_time)
             ),
             now_ms,
         )?;
@@ -307,7 +312,13 @@ pub fn record_attempt_terminal(
                 attempt.signal(),
                 now_ms,
                 spawn.map(|s| s.pid),
-                spawn.map(|s| s.pid_start_time),
+                // `and_then`, not `map`: an attempt that had a process but no
+                // readable start time contributes a pid and nothing else. `map`
+                // would hand SQLite an `Option<Option<i64>>`; flattening it here
+                // keeps "no spawn" and "no identity" writing the same `NULL`,
+                // which is right — `COALESCE` must not overwrite a recorded
+                // start time either way.
+                spawn.and_then(|s| s.pid_start_time),
             ],
         )?;
         append_event(
@@ -428,6 +439,18 @@ pub fn next_ordinal(conn: &Connection, run_id: &RunId) -> StoreResult<i64> {
 }
 
 fn json_opt_i32(value: Option<i32>) -> String {
+    match value {
+        Some(v) => v.to_string(),
+        None => "null".to_string(),
+    }
+}
+
+/// `null`, not `0`, for a number the system does not have.
+///
+/// The event log is read by humans reconstructing what happened. A `0` start
+/// time in an `AttemptStarted` event would read as a process that began at the
+/// Unix epoch; `null` reads as what it is — the identity was never established.
+fn json_opt_i64(value: Option<i64>) -> String {
     match value {
         Some(v) => v.to_string(),
         None => "null".to_string(),

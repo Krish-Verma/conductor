@@ -91,7 +91,7 @@ fn a_successful_agent_is_spawned_streamed_and_reaped() {
 
     // Reaped: the pid is gone from the process table entirely, not a zombie.
     assert!(
-        matches!(conductor_run::supervise::probe(pid, 0), Liveness::Dead),
+        conductor_run::supervise::start_time_us(pid).is_none(),
         "the child was not reaped"
     );
 }
@@ -142,7 +142,7 @@ fn a_stalled_agent_trips_the_idle_timer_and_is_killed() {
         other => panic!("expected a stall timeout, got {other:?}"),
     }
     assert!(
-        matches!(conductor_run::supervise::probe(pid, 0), Liveness::Dead),
+        conductor_run::supervise::start_time_us(pid).is_none(),
         "a timed-out agent must be dead and reaped, not left running"
     );
 }
@@ -171,10 +171,7 @@ fn a_busy_agent_trips_the_wall_clock_timer_not_the_idle_one() {
         }
         other => panic!("expected a wall-clock timeout, got {other:?}"),
     }
-    assert!(matches!(
-        conductor_run::supervise::probe(pid, 0),
-        Liveness::Dead
-    ));
+    assert!(conductor_run::supervise::start_time_us(pid).is_none());
 }
 
 #[test]
@@ -390,7 +387,7 @@ fn dropping_a_supervisor_kills_and_reaps_its_child() {
     // itself already happened inside `Drop`.
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
-        if matches!(conductor_run::supervise::probe(pid, 0), Liveness::Dead) {
+        if conductor_run::supervise::start_time_us(pid).is_none() {
             return;
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -407,10 +404,10 @@ fn a_recycled_pid_is_not_mistaken_for_the_original_process() {
     let real = conductor_run::supervise::start_time_us(me).expect("our own start time");
 
     assert!(matches!(
-        conductor_run::supervise::probe(me, real),
+        conductor_run::supervise::probe(me, Some(real)),
         Liveness::Alive(_)
     ));
-    match conductor_run::supervise::probe(me, real - 1_000_000) {
+    match conductor_run::supervise::probe(me, Some(real - 1_000_000)) {
         Liveness::Recycled { actual_start } => assert_eq!(actual_start, real),
         other => panic!("a mismatched start time must not read as alive: {other:?}"),
     }
@@ -437,10 +434,7 @@ fn sigterm_is_tried_before_sigkill() {
         "the agent takes the default SIGTERM disposition, so the grace period \
          should never have escalated to SIGKILL"
     );
-    assert!(matches!(
-        conductor_run::supervise::probe(pid, 0),
-        Liveness::Dead
-    ));
+    assert!(conductor_run::supervise::start_time_us(pid).is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -517,10 +511,7 @@ fn a_timed_out_agent_takes_its_grandchildren_with_it() {
     let child = agent.pid();
     let grandchild = grandchild_pid(dir.path());
     assert!(
-        matches!(
-            conductor_run::supervise::probe(grandchild, 0),
-            Liveness::Alive(_)
-        ),
+        conductor_run::supervise::start_time_us(grandchild).is_some(),
         "the grandchild must be alive before the kill, or the test proves nothing"
     );
 
@@ -535,10 +526,7 @@ fn a_timed_out_agent_takes_its_grandchildren_with_it() {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut alive = true;
     while Instant::now() < deadline {
-        if matches!(
-            conductor_run::supervise::probe(grandchild, 0),
-            Liveness::Dead
-        ) {
+        if conductor_run::supervise::start_time_us(grandchild).is_none() {
             alive = false;
             break;
         }
@@ -596,10 +584,7 @@ fn a_grandchild_holding_the_output_pipe_cannot_wedge_the_supervisor() {
         "expected the idle timer to end it: {ended:?}"
     );
     assert!(
-        matches!(
-            conductor_run::supervise::probe(grandchild, 0),
-            Liveness::Dead
-        ),
+        conductor_run::supervise::start_time_us(grandchild).is_none(),
         "grandchild {grandchild} survived"
     );
 }

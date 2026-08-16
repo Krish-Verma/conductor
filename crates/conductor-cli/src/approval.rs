@@ -17,6 +17,18 @@
 //! runs immediately before granting. One route means the thing they read is the
 //! thing the server will act on.
 //!
+//! # The sixth verb: `plan.approve`
+//!
+//! §7.1's `conductor plan approve <version>` is annotated *"human-only,
+//! socket-only"*, and §5.2 gives a plan version's `APPROVED` state to *"a human
+//! at the control socket"*. It is therefore served **here**, beside the other
+//! mutating verbs, rather than by a second dispatcher of its own: a second
+//! server would be a second door into the room this one guards, and it would
+//! pass a "goes over a socket" test while defeating the point of one. Its client
+//! is [`crate::plan`], which holds no store handle at all — asserted by
+//! `crates/conductor-cli/tests/plan_approve.rs` in the style of §4.3's existing
+//! source scan.
+//!
 //! # `serve` is hidden, and that is not an oversight
 //!
 //! §7.1 cuts `daemon start/stop` — *"auto-started on demand; `doctor` reports
@@ -36,21 +48,24 @@
 //! verbatim at startup, so nobody has to infer it.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Subcommand};
-use conductor_core::Fence;
 use conductor_core::effect::OperationId;
+use conductor_core::{Fence, PlanVersionState, ProjectId};
 use conductor_run::approval::binding::Binding;
-use conductor_run::approval::kind::{ApprovalKind, Expiry, ExpiryRule};
+use conductor_run::approval::kind::{ApprovalKind, Expiry, ExpiryRule, Subject};
 use conductor_run::approval::nonce::{NonceState, OperatorNonce, Tier};
 use conductor_run::approval::revoke::{InFlight, RevocationOutcome};
 use conductor_run::approval::store::{
-    ApprovalGrantRow, ApprovalRequestRow, GrantOptions, RequestState,
+    ApprovalGrantRow, ApprovalRequestRow, GrantOptions, NewApprovalRequest, RequestState,
 };
-use conductor_run::approval::{revoke, store as approvals};
-use conductor_run::policy::model::Scope;
+use conductor_run::approval::{Authorization, revoke, store as approvals};
+use conductor_run::plan::{self, ledger};
+use conductor_run::policy::load as policy_load;
+use conductor_run::policy::model::{FactSet, Origin, Scope};
+use conductor_run::verify::profile;
 use conductor_store::Store;
 use serde_json::{Value, json};
 
@@ -524,6 +539,7 @@ fn dispatch(store: &mut Store, request: &RpcRequest, nonce_hash: Option<&str>) -
         "approval.approve" => approve(store, &request.params),
         "approval.deny" => deny(store, &request.params),
         "approval.revoke" => revoke_grant(store, &request.params),
+        "plan.approve" => plan_approve(store, &request.params),
         other => Err(Refusal {
             code: rpc_code::METHOD_NOT_FOUND,
             message: format!("no such method {other}"),
@@ -540,7 +556,7 @@ fn dispatch(store: &mut Store, request: &RpcRequest, nonce_hash: Option<&str>) -
 fn mutating(method: &str) -> bool {
     matches!(
         method,
-        "approval.approve" | "approval.deny" | "approval.revoke"
+        "approval.approve" | "approval.deny" | "approval.revoke" | "plan.approve"
     )
 }
 
@@ -728,6 +744,240 @@ fn revoke_grant(store: &mut Store, params: &Value) -> Result<Value, Refusal> {
         "outcome": outcome_name(&outcome),
         "grant": grant_json(&row),
     }))
+}
+
+// ---------------------------------------------------------------------------
+// `plan.approve` — §7.1's human-only, socket-only verb
+// ---------------------------------------------------------------------------
+
+/// Make one plan version authoritative — §5.2's `AWAITING_APPROVAL → APPROVED`.
+///
+/// # Why one call does both halves of §4.3's request/grant pair
+///
+/// Every other approval in §4.3 has two actors: Conductor's policy engine
+/// *raises* the request when a gated action comes up, and a human *answers* it.
+/// A plan approval has one — §4.3's table gives it no policy action and no
+/// gate, and §7.1's surface has no `plan request` verb for a machine to call.
+/// The human running this command is both the question and the answer, so the
+/// request and the grant are written together, and the request/grant pair is
+/// the *record* of that decision rather than a conversation between two parties.
+/// It is still a real §4.3 grant: [`ledger::approve`] re-derives it from the
+/// rows and refuses anything that is not a live `PLAN_APPROVAL` over
+/// [`Subject::PlanVersion`] for this exact version.
+///
+/// The ids carry `now_ms` because §4.3 spends a grant on use. §5.2's restart
+/// clause — a content-hash mismatch on an `APPROVED` plan is *"cleared by
+/// re-running `conductor plan approve`"* — therefore needs a **new** grant each
+/// time, which is exactly the human decision it is asking for.
+///
+/// # §3.3's control 2 is enforced here, not trusted
+///
+/// > Conductor reads plan approval **only** from the registered repository's
+/// > working tree, never from a run branch.
+///
+/// The client offers a root; this refuses it if the project is already
+/// registered somewhere else. Without that check, an agent that reached the
+/// socket could re-point a registered project at its own workspace clone and
+/// have its edited plan approved — which is the precise failure §3.3 is written
+/// against. A project that is *not* yet registered is registered from the
+/// offered root, because [`ledger::register_project`] is the only function in
+/// the ledger that takes a path at all, and something has to be first.
+fn plan_approve(store: &mut Store, params: &Value) -> Result<Value, Refusal> {
+    let offered = PathBuf::from(string(params, "repo_root")?);
+    let root = offered
+        .canonicalize()
+        .map_err(|err| Refusal::invalid(format!("repo_root {}: {err}", offered.display())))?;
+    let version = params["version"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| Refusal::invalid("version is required and is a whole number"))?;
+
+    let config = plan::project::load(&root).map_err(|err| Refusal::invalid(err.to_string()))?;
+    if let Some(declared) = params["project_id"].as_str()
+        && declared != config.id
+    {
+        return Err(Refusal::refused(format!(
+            "the client named project {declared} but {} declares {}; §3.3 reads \
+             approval only from the registered tree, and two answers to \"which \
+             project is this?\" is not one of them",
+            root.display(),
+            config.id
+        )));
+    }
+    let project_id =
+        ProjectId::new(config.id.clone()).map_err(|err| Refusal::invalid(err.to_string()))?;
+
+    let registered = store
+        .project(&project_id)
+        .map_err(|err| Refusal::refused(err.to_string()))?;
+    match &registered {
+        Some(row) if Path::new(&row.root_path) != root => {
+            return Err(Refusal::refused(format!(
+                "project {project_id} is registered at {} and this approval was \
+                 offered {}; §3.3 control 2 reads plan approval only from the \
+                 registered working tree, so re-pointing it at another tree is \
+                 refused rather than followed",
+                row.root_path,
+                root.display()
+            )));
+        }
+        Some(_) => {}
+        None => {
+            ledger::register_project(store, &root, now_ms())
+                .map_err(|err| Refusal::refused(err.to_string()))?;
+        }
+    }
+
+    // §3.7's clarification 3: "the validator takes the catalogue as a parameter
+    // and the caller assembles it". Read from the registered tree, like
+    // everything else this verb reads.
+    let catalogue_path = root.join(".conductor/verification.yaml");
+    let catalogue = plan::check_ids(
+        &profile::load(&catalogue_path)
+            .map_err(|err| Refusal::invalid(err.to_string()))?
+            .profile,
+    );
+
+    let plan_version = ledger::plan_version_id(&project_id, version);
+    if store
+        .plan_version(&plan_version)
+        .map_err(|err| Refusal::refused(err.to_string()))?
+        .is_none()
+    {
+        ledger::register_plan_version(store, &project_id, version, &catalogue)
+            .map_err(|err| Refusal::refused(err.to_string()))?;
+    }
+    let row = store
+        .plan_version(&plan_version)
+        .map_err(|err| Refusal::refused(err.to_string()))?
+        .ok_or_else(|| Refusal::refused(format!("plan version {plan_version} vanished")))?;
+
+    // §5.2's `──request──►` edge. `plan approve` walks it because §7.1 has no
+    // separate verb for it and a plan approval has nobody else to raise it.
+    match row.state {
+        PlanVersionState::Validated => {
+            store
+                .set_plan_state(&plan_version, PlanVersionState::AwaitingApproval)
+                .map_err(|err| Refusal::refused(err.to_string()))?;
+        }
+        // Already asked, or already answered — the second is §5.2's restart
+        // clause, which re-approves an edited document without moving the state.
+        PlanVersionState::AwaitingApproval | PlanVersionState::Approved => {}
+        // §5.2: "Invalid: `DRAFT → APPROVED`". A row nothing validated must not
+        // become authoritative because a human typed the version number.
+        PlanVersionState::Draft => {
+            return Err(Refusal::refused(format!(
+                "plan version {plan_version} is DRAFT; §5.2 makes DRAFT → \
+                 APPROVED invalid, because approving a document nothing \
+                 validated is approving §3.7's refusals along with it"
+            )));
+        }
+        PlanVersionState::Superseded => {
+            return Err(Refusal::refused(format!(
+                "plan version {plan_version} is SUPERSEDED; §5.2 gives it no \
+                 successor, and a later version is already authoritative"
+            )));
+        }
+    }
+
+    let policy_hash = plan_policy_hash(&root)?;
+    let subject = Subject::PlanVersion {
+        plan_version_id: plan_version.as_str().to_string(),
+    };
+    let stamp = now_ms();
+    let request_id = format!("AR-{plan_version}-{stamp}");
+    approvals::request(
+        store.conn_mut(),
+        &NewApprovalRequest {
+            id: request_id.clone(),
+            subject,
+            // §4.3's plan approval is not about a run, and `approval revoke`
+            // says so out loud: a grant with no run cannot be revoked in S8
+            // because the findings revocation writes are statements about a run.
+            run_id: None,
+            facts: FactSet::new(),
+            policy_hash: policy_hash.clone(),
+            matched_rules: Vec::new(),
+            explanation: format!(
+                "a human at the control socket is making plan version v{version} \
+                 authoritative (§5.2)"
+            ),
+            evidence_ref: None,
+            // §4.3's fourth column: a plan approval does not expire.
+            expires: Expiry::Never,
+        },
+        stamp,
+    )
+    .map_err(|err| Refusal::refused(err.to_string()))?;
+
+    let granted = approvals::grant(
+        store.conn_mut(),
+        &request_id,
+        &GrantOptions {
+            id: format!("AG-{plan_version}-{stamp}"),
+            // One plan version, which is §4.3's granularity for this kind. A
+            // grant scoped wider would be a grant that could be spent on a
+            // version nobody was asked about.
+            scope: Scope::from_pairs([(
+                "plan_version".to_string(),
+                plan_version.as_str().to_string(),
+            )]),
+            reuse: false,
+            expires: Expiry::Never,
+            granted_by: params["granted_by"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string(),
+            channel: CHANNEL.to_string(),
+            nonce_hash: None,
+        },
+        stamp,
+    )
+    .map_err(|err| Refusal::refused(err.to_string()))?;
+
+    let approval = ledger::approve(
+        store,
+        &project_id,
+        version,
+        &Authorization::Authorized {
+            grant_id: granted.id,
+        },
+        stamp,
+    )
+    .map_err(|err| Refusal::refused(err.to_string()))?;
+
+    Ok(json!({
+        "plan_version": approval.plan_version_id.as_str(),
+        "version": approval.version,
+        "content_hash": approval.content_hash.as_str(),
+        "approver": approval.approver,
+        "approved_at": approval.approved_at_ms,
+        "policy_hash": approval.policy_hash,
+        "sidecar": plan::approved_path(approval.version),
+    }))
+}
+
+/// The policy snapshot the human is approving under — §3.1's sidecar carries it.
+///
+/// Resolved from disk rather than defaulted, because §3.1 names *"policy hash"*
+/// as one of the four things `.conductor/plans/vN/APPROVED` records, and a
+/// constant there would make every approval look like it happened under the
+/// same rules. A file that is absent is not an error — an operator with no
+/// global policy has no global policy — but a file that is present and
+/// unreadable is, for `crate::policy::load_if_present`'s reason: carrying on
+/// would record a hash for a policy that is not the one in force.
+fn plan_policy_hash(root: &Path) -> Result<String, Refusal> {
+    let global = policy_load::global_policy_path();
+    let project = root.join(policy_load::PROJECT_POLICY_PATH);
+    let resolved = policy_load::resolve_documents(
+        crate::policy::load_if_present(global.as_deref(), Origin::Global)
+            .map_err(Refusal::invalid)?,
+        crate::policy::load_if_present(Some(&project), Origin::Project)
+            .map_err(Refusal::invalid)?,
+        None,
+    )
+    .map_err(|err| Refusal::invalid(err.to_string()))?;
+    Ok(policy_load::snapshot(&resolved).hash)
 }
 
 /// §4.3's four rows, named so a script can tell them apart.

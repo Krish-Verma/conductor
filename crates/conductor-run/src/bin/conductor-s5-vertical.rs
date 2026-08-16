@@ -98,6 +98,8 @@ fn main() {
         startup_grace: Duration::from_secs(30),
         sensitive: conductor_git::SensitivePatterns::default(),
         agent_env_extra: Default::default(),
+        // The fake agent authenticates against nothing.
+        credential_home: None,
         // This harness kills Conductor at named integration points; the tasks
         // it drives declare no `execution_requirements`, so §4.2's gate
         // compares an empty vector and proceeds without consulting the cache.

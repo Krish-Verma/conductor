@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::error::{StoreError, StoreResult};
 
 /// The highest schema version this binary understands.
-pub const SUPPORTED_SCHEMA_VERSION: i64 = 7;
+pub const SUPPORTED_SCHEMA_VERSION: i64 = 8;
 
 /// Pragmas as they are *set*, in application order.
 ///
@@ -522,4 +522,69 @@ CREATE INDEX ix_request_pending ON approval_request(state, expires_at)
 /// database, so an explanation can quote what was actually written.
 pub const SCHEMA_V7: &str = r#"
 ALTER TABLE task ADD COLUMN execution_requirements TEXT;
+"#;
+
+/// Schema v8 — materialized plan content on the task row.
+///
+/// # `project`, `plan_version` and `decision` already exist; nothing wrote them
+///
+/// [`SCHEMA_V1`] shipped all three tables verbatim from Part 5.1. What it did
+/// not ship — because S1's scope was the schema, not the ledger — was any
+/// `conductor-store` function that wrote or read a row in them. Every test
+/// through S10 hand-seeds `project` and `plan_version` directly
+/// (`tests/common::seed_parents`) because there was no other way to get a row
+/// in. S11 needs real rows: `plan validate` materializes `task` rows from a
+/// parsed plan document, `plan approve` moves a `plan_version` through §5.2's
+/// five states, and a decision file gets a `decision` row. `ledger.rs` is
+/// that API. This migration adds the one thing materialization needs that the
+/// v1 schema does not already have: somewhere on `task` to put what a plan
+/// document declared.
+///
+/// # The three columns
+///
+/// `declared_actions` mirrors `conductor_run::plan::model::Task::actions` (S11
+/// task 1) — the §4.4 action names a task is authorized to perform, which
+/// §4.3's unattended-tier gate reads. `depends_on` mirrors `Task::depends_on`
+/// — task ids that must reach `COMPLETE` first (§5.2's "deps met"). `acceptance_criteria`
+/// mirrors `Task::acceptance_criteria` — what §4.5's completion criterion 5
+/// binds against.
+///
+/// All three are `TEXT`, all three nullable, and all three hold the JSON the
+/// plan model already serializes to, **not decoded here**. `declared_actions`
+/// and `depends_on` are plain string arrays and could safely be decoded to
+/// `Vec<String>` in this crate — `task.scope_globs` already is. `acceptance_criteria`
+/// cannot: its element shape belongs to `conductor_run::plan::model::AcceptanceCriterion`,
+/// and `conductor-store` may not depend on `conductor-run` (the dependency
+/// runs the other way) to borrow that type, nor should it invent a second,
+/// possibly drifting, definition of what an acceptance criterion looks like.
+/// Rather than decode two columns and pass the third through as text — two
+/// conventions doing one job — all three are treated the same way
+/// [`SCHEMA_V7`]'s `execution_requirements` already is: materialized copies,
+/// handed back exactly as `conductor-run` wrote them, decoded by the code that
+/// owns the shape.
+///
+/// # `NULL` and `'[]'` are two different facts, not two spellings of one
+///
+/// `NULL` is what every row created before this migration has, and what
+/// `task::create_task` still writes today — S11's materializer does not touch
+/// that function. It means **"no plan document has ever been read for this
+/// task"**: there is no declaration, gateable or otherwise, to find. `'[]'`
+/// means a plan document *was* read and its author declared zero entries — a
+/// task with no actions authorizes nothing, a task with no acceptance
+/// criteria has, per §3.7, nothing mechanically binding its completion.
+///
+/// Collapsing the two — for instance by having the getter default an absent
+/// column to `'[]'` — would let §4.3's approval gate read a task nothing has
+/// ever materialized as one that *provably* declares no gateable action. That
+/// is the "unknown state read as a permissive default" this project's
+/// operating contract forbids in general, applied to these three columns in
+/// particular: the honest statement about a pre-S11 row is "this was never
+/// checked," not "this was checked and found empty," and only `NULL` says the
+/// first thing. So the getters return `Option<String>`, never defaulting an
+/// absent column, and the distinction is asserted by a test rather than left
+/// to be noticed later.
+pub const SCHEMA_V8: &str = r#"
+ALTER TABLE task ADD COLUMN declared_actions TEXT;
+ALTER TABLE task ADD COLUMN depends_on TEXT;
+ALTER TABLE task ADD COLUMN acceptance_criteria TEXT;
 "#;

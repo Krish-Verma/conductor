@@ -1,0 +1,48 @@
+# `valid.yaml` with exactly one field changed: T-0002's `allowed_globs` widens
+# from `crates/conductor-run/src/plan/**` to `crates/conductor-run/src/**`.
+#
+# The change is deliberately one that leaves the plan *valid* — the point is the
+# second half of §3.6 ("changing any field **does**" invalidate approval), not
+# validation. It is also the change with the largest blast radius and the
+# smallest diff: a widened scope glob is a widened write permission, and an
+# approval that survived it would be an approval of something nobody approved.
+plan:
+  id: p-fixture
+  version: 3
+  objective: "Prove that the S11 plan core accepts a well-formed plan."
+  milestones:
+    - id: M-01
+      title: "Plan core"
+      slices:
+        - id: S-11
+          title: "Plan ledger"
+          tasks:
+            - id: T-0001
+              objective: "Model the plan document."
+              rationale: "Nothing downstream can be checked until the shape exists."
+              depends_on: []
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              attempt_budget: 3
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "The model deserialises the fixture plans."
+                  verified_by: [unit-tests]
+            - id: T-0002
+              objective: "Validate the plan document."
+              rationale: "An unbound criterion is how a task completes on an agent's word."
+              depends_on: [T-0001]
+              scope:
+                allowed_globs: ["crates/conductor-run/src/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              attempt_budget: 3
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "Every refusal names the offending id."
+                  verified_by: [unit-tests, typecheck]
+                - id: AC-2
+                  statement: "No secret reaches the validation report."
+                  verified_by: [no-secrets]

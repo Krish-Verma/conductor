@@ -110,6 +110,61 @@ fn run_state(store: &Store) -> RunState {
         .state
 }
 
+/// Plant one `ACTIVE` attempt on the seeded run — what a supervisor that died
+/// mid-run leaves behind for §4.7 step 3 to probe.
+fn plant_active_attempt(store: &mut Store, pid: i32, pid_start_time: Option<i64>) {
+    let fence = claim_for_setup(store);
+    let attempt = store
+        .create_attempt(
+            &fence,
+            NewAttempt {
+                id: conductor_core::AttemptId::new("a-1").expect("id"),
+                ordinal: 1,
+                kind: "IMPLEMENT".to_string(),
+                adapter: "fake".to_string(),
+                launcher: "none".to_string(),
+                caps_snapshot: "{}".to_string(),
+                agent_session_id: None,
+            },
+            NOW,
+        )
+        .expect("create")
+        .starting()
+        .active(pid, pid_start_time);
+    store
+        .record_attempt_active(&fence, &attempt, NOW)
+        .expect("active");
+}
+
+/// Erase a recorded start time the way a crash does — by writing the row, not
+/// by calling a constructor.
+///
+/// Deliberately raw SQL: the point of the test that uses it is a row Conductor
+/// has to survive *reading*, whoever wrote it, including a build older than this
+/// one. Going through the typestate would only prove the typestate agrees with
+/// itself.
+fn forget_recorded_start_time(store: &mut Store, attempt_id: &str) {
+    store
+        .conn_mut()
+        .execute(
+            "UPDATE attempt SET pid_start_time = NULL WHERE id = ?1",
+            rusqlite::params![attempt_id],
+        )
+        .expect("forget the start time");
+}
+
+/// The recorded start time as it sits in the database.
+fn recorded_start_time(store: &Store, attempt_id: &str) -> Option<i64> {
+    store
+        .conn()
+        .query_row(
+            "SELECT pid_start_time FROM attempt WHERE id = ?1",
+            rusqlite::params![attempt_id],
+            |row| row.get(0),
+        )
+        .expect("row")
+}
+
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -165,7 +220,7 @@ fn step_3_records_a_dead_pid_as_stale_never_as_crashed() {
         )
         .expect("create")
         .starting()
-        .active(999_999, 12_345);
+        .active(999_999, Some(12_345));
     store
         .record_attempt_active(&fence, &attempt, NOW)
         .expect("active");
@@ -220,7 +275,7 @@ fn step_3_refuses_to_adopt_a_recycled_pid() {
         .expect("create")
         .starting()
         // A start time that is certainly not ours.
-        .active(me, 1);
+        .active(me, Some(1));
     store
         .record_attempt_active(&fence, &attempt, NOW)
         .expect("active");
@@ -250,10 +305,149 @@ fn step_3_refuses_to_adopt_a_recycled_pid() {
     );
 
     // The proof it did not act on it: this process is still here.
-    assert!(matches!(
-        conductor_run::supervise::probe(me, 0),
-        conductor_run::supervise::Liveness::Alive(_)
-    ));
+    assert!(conductor_run::supervise::start_time_us(me).is_some());
+}
+
+#[test]
+fn step_3_refuses_to_adopt_a_pid_whose_recorded_start_time_is_absent() {
+    // §4.7 step 3 asks "alive **and** start-time matches?". With no recorded
+    // start time the second half of that question has no answer, and a question
+    // that cannot be answered must not be answered in the affirmative: adopting
+    // a stranger's process is worse than adopting nothing. The pid here is
+    // unambiguously alive — it is this test process — which is exactly the case
+    // a fail-open would swallow.
+    let world = World::new();
+    let mut store = world.store();
+    let me = std::process::id() as i32;
+    let real = conductor_run::supervise::start_time_us(me).expect("our own start time");
+
+    plant_active_attempt(&mut store, me, Some(real));
+    forget_recorded_start_time(&mut store, "a-1");
+
+    let mut config = world.config();
+    // Adoption *enabled*, so a refusal here is the identity check refusing and
+    // not merely the conservative default declining.
+    config.adopt_live_agents = true;
+    let report = recover(&mut store, &config, NOW + LEASE_MS * 2).expect("recover");
+
+    assert!(
+        !report.decisions.iter().any(|d| matches!(
+            d,
+            RecoveryDecision::AdoptedLiveAgent { .. }
+                | RecoveryDecision::TerminatedLiveAgent { .. }
+        )),
+        "an unidentifiable pid must be neither adopted nor killed: {:?}",
+        report.decisions
+    );
+    let decision = report
+        .decisions
+        .iter()
+        .find(|d| matches!(d, RecoveryDecision::AttemptStale { .. }))
+        .expect("an attempt with no recorded identity is STALE");
+    match decision {
+        RecoveryDecision::AttemptStale { reason, .. } => {
+            assert!(
+                reason.contains(&me.to_string()),
+                "the reason must name the pid it refused: {reason}"
+            );
+            assert!(
+                reason.contains("start time"),
+                "the reason must say the identity was missing, not that the pid was: {reason}"
+            );
+        }
+        other => panic!("unexpected decision {other:?}"),
+    }
+
+    let attempts = store
+        .attempts_for_run(&RunId::new(RUN).expect("id"))
+        .expect("attempts");
+    assert_eq!(attempts[0].outcome, Some(AttemptOutcome::Stale));
+    assert_eq!(
+        attempts[0].pid,
+        Some(me),
+        "the pid is still evidence even when the identity is not established"
+    );
+    assert_eq!(
+        recorded_start_time(&store, "a-1"),
+        None,
+        "recovery must not invent the start time it could not read"
+    );
+
+    // The proof it did not act on it: this process is still here.
+    assert!(conductor_run::supervise::start_time_us(me).is_some());
+}
+
+#[test]
+fn step_3_refuses_to_adopt_a_pid_whose_recorded_start_time_is_the_zero_sentinel() {
+    // A stored `0` is not a start time — no process began at the Unix epoch. It
+    // is what a build that collapsed "the start time could not be read" into a
+    // sentinel wrote, and those rows are still in databases. Believing one makes
+    // §4.7 step 3 adopt whatever now happens to hold the pid, which is the
+    // fail-open this test exists to close.
+    let world = World::new();
+    let mut store = world.store();
+    let me = std::process::id() as i32;
+
+    plant_active_attempt(&mut store, me, Some(0));
+
+    let mut config = world.config();
+    config.adopt_live_agents = true;
+    let report = recover(&mut store, &config, NOW + LEASE_MS * 2).expect("recover");
+
+    assert!(
+        !report.decisions.iter().any(|d| matches!(
+            d,
+            RecoveryDecision::AdoptedLiveAgent { .. }
+                | RecoveryDecision::TerminatedLiveAgent { .. }
+        )),
+        "a zero start time is an absent identity, not a wildcard: {:?}",
+        report.decisions
+    );
+    let decision = report
+        .decisions
+        .iter()
+        .find(|d| matches!(d, RecoveryDecision::AttemptStale { .. }))
+        .expect("a zero start time is STALE, never adopted");
+    match decision {
+        RecoveryDecision::AttemptStale { reason, .. } => assert!(
+            reason.contains("no start time"),
+            "a `0` is an absent identity, not evidence that some *other* process \
+             took the pid — saying so would send an operator hunting a recycled \
+             pid that never existed: {reason}"
+        ),
+        other => panic!("unexpected decision {other:?}"),
+    }
+
+    // The proof it did not act on it: this process is still here.
+    assert!(conductor_run::supervise::start_time_us(me).is_some());
+}
+
+#[test]
+fn step_3_still_adopts_an_agent_whose_recorded_identity_matches() {
+    // The positive control for the two refusals above. §4.7 step 3's "alive →
+    // adopt or terminate (config)" has to stay reachable: a recovery that
+    // refuses everything is not a stricter identity check, it is a broken one.
+    // This control cannot fail before the fix — it pins behaviour the fix must
+    // preserve, not behaviour it introduces.
+    let world = World::new();
+    let mut store = world.store();
+    let me = std::process::id() as i32;
+    let real = conductor_run::supervise::start_time_us(me).expect("our own start time");
+
+    plant_active_attempt(&mut store, me, Some(real));
+
+    let mut config = world.config();
+    config.adopt_live_agents = true;
+    let report = recover(&mut store, &config, NOW + LEASE_MS * 2).expect("recover");
+
+    assert!(
+        report
+            .decisions
+            .iter()
+            .any(|d| matches!(d, RecoveryDecision::AdoptedLiveAgent { pid, .. } if *pid == me)),
+        "a matching identity is still adoptable: {:?}",
+        report.decisions
+    );
 }
 
 #[test]

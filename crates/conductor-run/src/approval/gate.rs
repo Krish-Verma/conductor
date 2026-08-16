@@ -20,14 +20,24 @@
 //! and "requires `control_surface: hard`" are the same statement, and the
 //! second one is the one the existing gate can act on.
 //!
-//! # Where this is, and is not, wired
+//! # Where this is wired
 //!
 //! [`unattended_requirements`] is a pure function, like `eligibility::check`
-//! itself. **It is not called from the attempt-launch path**, for the reason
-//! the master plan's note on acceptance row 30 gives: §4.2 says "before
-//! launching an attempt", that is enforcement, and S9 owns enforcement. Until
-//! S9 wires it, the binding rule is *decided* and not *reachable from a real
-//! launch* — recorded here so the difference cannot be mistaken for coverage.
+//! itself, and **S11 gave it the caller it was written for**.
+//! [`crate::enforce::launch::gate`] reads `task.declared_actions` — the column
+//! S11's plan materializer writes — resolves the policy the run is pinned to,
+//! and [`merge`]s the result into the vector it hands `eligibility::check`,
+//! before the claim and before any attempt launches. That is the "before
+//! launching an attempt" §4.2 names, so the binding rule is now reachable from a
+//! real launch and not merely decided.
+//!
+//! It stayed unreachable through S9 and S10 for one reason, kept here because
+//! the shape recurs: the rule needs the set of actions a task may perform, and
+//! until S11's plan document there was no way for a task to declare one. A gate
+//! that guessed the set would have been enforcement resting on an invention.
+//! `enforce_eligibility` is where the wiring is proven, through
+//! `vertical::run_task` in both directions — refused below tier A, launched on a
+//! host measured `control_surface: Hard`.
 
 use crate::policy::eligibility::ExecutionRequirements;
 use crate::policy::model::{Action, Effect, ResolvedPolicy};

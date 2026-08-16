@@ -197,7 +197,13 @@ fn resolve_from_disk(args: &ExplainArgs) -> Result<ResolvedPolicy, String> {
     .map_err(|e| e.to_string())
 }
 
-fn load_if_present(
+/// Load a policy document if the file is there.
+///
+/// Shared with [`crate::approval`], which needs the same rule when it records
+/// the policy hash §3.1's `APPROVED` sidecar carries: absent is not an error,
+/// present-and-unreadable is. Two copies of that rule would be two places for
+/// "carry on without it" to creep into one of them.
+pub(crate) fn load_if_present(
     path: Option<&Path>,
     origin: Origin,
 ) -> Result<Option<conductor_run::policy::model::PolicyDocument>, String> {

@@ -1,0 +1,38 @@
+# `valid.yaml` with one defect: T-0001 is declared twice.
+#
+# §3.6: "Stable IDs […] assigned once, never reused." A duplicate id makes every
+# other rule meaningless — a dependency on T-0001, a finding about T-0001 and a
+# commit trailer naming T-0001 would each address two different tasks.
+plan:
+  id: p-fixture
+  version: 3
+  objective: "Two tasks share an id."
+  milestones:
+    - id: M-01
+      title: "Plan core"
+      slices:
+        - id: S-11
+          title: "Plan ledger"
+          tasks:
+            - id: T-0001
+              objective: "Model the plan document."
+              depends_on: []
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "The model deserialises the fixture plans."
+                  verified_by: [unit-tests]
+            - id: T-0001
+              objective: "Validate the plan document."
+              depends_on: []
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "Every refusal names the offending id."
+                  verified_by: [unit-tests]

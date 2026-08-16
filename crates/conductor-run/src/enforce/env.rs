@@ -255,6 +255,33 @@ fn write_askpass(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// What an adapter needs copied into its per-run credential home, and the
+/// variable that names it.
+///
+/// # Why this is a *request* the caller states, and not something inferred
+///
+/// [`materialize_credential_home`] cannot run until the workspace exists, and
+/// the workspace does not exist until the run has been claimed and cloned — so
+/// the value of `CODEX_HOME` is not knowable when a caller builds its
+/// configuration. `agent_env_extra` holds the variables whose values *are*
+/// knowable then; this holds the one that is not.
+///
+/// It stays a request rather than becoming a method on the adapter for the same
+/// reason §4.9's allowlist is a build rather than a filter: the caller that
+/// chose the adapter names the variable, by hand, in a place a reader can find
+/// it. An adapter that could quietly ask for a credential would be a filter
+/// wearing an allowlist's clothes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialHomeRequest {
+    /// The variable the agent reads — `CODEX_HOME` for §6.2's adapter.
+    pub variable: String,
+    /// The operator's own credential directory. Read by Conductor, **never**
+    /// handed to the agent: see [`materialize_credential_home`].
+    pub source: PathBuf,
+    /// The file names to copy out of `source`. Only these.
+    pub files: Vec<String>,
+}
+
 /// Materialise a per-run credential directory for an adapter that needs one.
 ///
 /// # Why a directory, when §4.9 says "the adapter's own auth **variable**"

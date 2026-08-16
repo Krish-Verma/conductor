@@ -130,6 +130,8 @@ fn main() {
             Some(path) => [("CONDUCTOR_SOCK".to_string(), path)].into_iter().collect(),
             None => Default::default(),
         },
+        // The fake agent authenticates against nothing.
+        credential_home: None,
         // S3's worker runs one attempt; §4.6's session policy is repair's.
         agent_session_id: None,
     };

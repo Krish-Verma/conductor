@@ -163,6 +163,15 @@ pub struct WorkerConfig {
     /// explicitly by name. It is still a build, not a filter — nothing arrives
     /// here by inheritance.
     pub agent_env_extra: std::collections::BTreeMap<String, String>,
+    /// The credential directory this adapter needs materialised, if it needs
+    /// one (§4.9, as amended by S10).
+    ///
+    /// Separate from `agent_env_extra` because its value cannot exist yet: the
+    /// per-run credential home lives **inside the workspace**, and the workspace
+    /// is created by [`run_one_attempt`], not by the caller that built this.
+    /// `None` is the ordinary case and means the agent is given no credential
+    /// at all.
+    pub credential_home: Option<crate::enforce::env::CredentialHomeRequest>,
     /// The agent session this attempt resumes, when §4.6 says resume.
     ///
     /// `None` is the ordinary case and covers all three of
@@ -292,6 +301,35 @@ pub fn run_one_attempt(
         ))
     })?;
 
+    // §4.9's last clause for an adapter whose credential is a *directory* and
+    // not a variable. It happens here, and not where the caller built its
+    // configuration, for one reason: the per-run credential home lives inside
+    // the workspace, and the workspace only exists a few lines above this one.
+    //
+    // Deliberately **after** `prepare`, which is what excludes the directory
+    // from git — a credential must never be able to become a commit, and the
+    // exclude has to be in place before the file is.
+    //
+    // A missing credential ends the attempt here, exactly as a failed `prepare`
+    // does. An empty credential home would launch and fail deep inside the
+    // agent as an opaque `401`, several layers away from the cause.
+    let mut agent_env_extra = config.agent_env_extra.clone();
+    if let Some(request) = &config.credential_home {
+        let files: Vec<&str> = request.files.iter().map(String::as_str).collect();
+        let home = crate::enforce::env::materialize_credential_home(
+            &workspace_path,
+            &request.source,
+            &files,
+        )
+        .map_err(|e| {
+            WorkerError::Spawn(format!(
+                "materialising the per-run credential home for {} failed: {e}",
+                request.variable
+            ))
+        })?;
+        agent_env_extra.insert(request.variable.clone(), home.display().to_string());
+    }
+
     // The `/tmp` window opens **before** the agent starts, or the "during the
     // attempt window" in §4.8's surface would mean nothing: a before-snapshot
     // taken afterwards cannot tell a file the agent wrote from one that was
@@ -310,10 +348,7 @@ pub fn run_one_attempt(
         workspace: workspace_path.clone(),
         report_path: report_path.clone(),
         session_id: config.agent_session_id.clone(),
-        env: run_env
-            .clone()
-            .with_extra(&config.agent_env_extra)
-            .into_vars(),
+        env: run_env.clone().with_extra(&agent_env_extra).into_vars(),
     };
     let command = adapter
         .command(&start)
@@ -502,7 +537,7 @@ pub fn run_one_attempt(
             fence,
             &run_id,
             &format!("{:?}", finding.kind).to_uppercase(),
-            "WARNING",
+            reconciliation_severity(finding.kind),
             &finding.detail,
         )?);
     }
@@ -560,6 +595,13 @@ pub fn run_one_attempt(
 pub fn route_for(reconciliation: &Reconciliation) -> ReconciledRoute {
     match reconciliation.verdict {
         Verdict::Corrupt => ReconciledRoute::Blocked,
+        // §3.3 control 1, and acceptance row 29's "Human? **yes**,
+        // `AWAITING_REVIEW`". Deliberately **not** `AwaitingApproval`: a
+        // governance change is not a thing a policy gate can authorise, because
+        // the object it would be authorised against is the rule set itself.
+        // Deliberately not `Blocked` either — row 29 ends at a person, and
+        // `BLOCKED` is where §5.2 sends a repository nobody can read.
+        Verdict::GovernanceViolation => ReconciledRoute::AwaitingReview,
         Verdict::Contradicted => ReconciledRoute::AwaitingReview,
         Verdict::PolicySensitive => ReconciledRoute::AwaitingApproval,
         Verdict::OutOfScope => ReconciledRoute::AwaitingReview,
@@ -798,7 +840,7 @@ fn finish_without_agent(
             fence,
             fence.run_id(),
             &format!("{:?}", finding.kind).to_uppercase(),
-            "WARNING",
+            reconciliation_severity(finding.kind),
             &finding.detail,
         )?);
     }
@@ -822,6 +864,31 @@ fn finish_without_agent(
         findings,
         changed_paths: reconciliation.changed_paths.clone(),
     })
+}
+
+/// What severity a reconciliation finding is recorded at.
+///
+/// Everything §4.8 observes is `WARNING` — a delta a person should see, which
+/// §4.8's "findings never auto-resolve" already guarantees reaches them — with
+/// one exception.
+///
+/// **A `.conductor/` change is `CRITICAL`, and that is load-bearing rather than
+/// emphatic.** §4.5's completion criterion 4 blocks `COMPLETE` on unresolved
+/// findings *of blocking severity*, so `CRITICAL` is what makes §3.3's rejection
+/// survive independently of the verdict. Three layers have to fail before a
+/// governance edit reaches the registered repository: this severity, the
+/// [`Verdict::GovernanceViolation`] route to `AWAITING_REVIEW`, and the fact
+/// that a run which never reaches `VERIFYING` never reaches the fetch. §3.3 says
+/// "unconditionally", and one mechanism is not a condition-free guarantee.
+///
+/// [`Verdict::GovernanceViolation`]: conductor_git::reconcile::Verdict::GovernanceViolation
+fn reconciliation_severity(kind: conductor_git::reconcile::FindingKind) -> &'static str {
+    match kind {
+        conductor_git::reconcile::FindingKind::GovernancePath => {
+            crate::vertical::BLOCKING_FINDING_SEVERITY
+        }
+        _ => "WARNING",
+    }
 }
 
 fn raise(

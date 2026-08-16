@@ -65,6 +65,29 @@ pub enum Verdict {
     PolicySensitive,
     /// The report contradicts observed state.
     Contradicted,
+    /// A change to `.conductor/**` arrived on the run branch — §3.3 control 1.
+    ///
+    /// **An eighth verdict, added at S11, and the only one §4.8's original table
+    /// does not list.** §3.3 requires such a change to be *"rejected at
+    /// reconciliation, **unconditionally**"*, and the cheap implementation —
+    /// reuse [`Verdict::OutOfScope`], since §3.3 calls `.conductor/**` an
+    /// *"always-forbidden write scope"* — cannot deliver that word. §4.8 ranks
+    /// `POLICY_SENSITIVE` and `CONTRADICTED` **above** `OUT_OF_SCOPE`, so an
+    /// agent that edited `.conductor/policy.yaml` while also touching a lockfile
+    /// would classify as `POLICY_SENSITIVE`, route to approval, and a human
+    /// granting the dependency would advance a run carrying a governance
+    /// mutation. That is exactly the subversion §3.3's three controls exist to
+    /// prevent.
+    ///
+    /// Ranked directly below [`Verdict::Corrupt`]: a broken repository makes
+    /// every other reading unreliable, but nothing else outranks discovering
+    /// that the rules themselves were edited.
+    ///
+    /// **Precedence is the third layer of the guarantee, not the only one.** The
+    /// finding is `CRITICAL` and findings never auto-resolve (§4.8), and the
+    /// integration path refuses to fetch a run branch carrying one. Either alone
+    /// stops the change reaching the registered repository.
+    GovernanceViolation,
     /// The repository is broken.
     Corrupt,
 }
@@ -86,6 +109,7 @@ impl From<Verdict> for conductor_core::completion::ReconciliationEvidence {
             | Verdict::OutOfScope
             | Verdict::PolicySensitive
             | Verdict::Contradicted
+            | Verdict::GovernanceViolation
             | Verdict::Corrupt => Evidence::NotClean {
                 verdict: verdict.to_string(),
             },
@@ -103,6 +127,7 @@ impl Verdict {
             Verdict::OutOfScope => "OUT_OF_SCOPE",
             Verdict::PolicySensitive => "POLICY_SENSITIVE",
             Verdict::Contradicted => "CONTRADICTED",
+            Verdict::GovernanceViolation => "GOVERNANCE_VIOLATION",
             Verdict::Corrupt => "CORRUPT",
         }
     }
@@ -152,6 +177,13 @@ pub enum FindingKind {
     ReportOmittedChange,
     /// The repository cannot be read or is mid-operation.
     RepositoryCorrupt,
+    /// A changed path is inside `.conductor/` — §3.3 control 1.
+    ///
+    /// Deliberately **not** a member of [`FindingKind::forces_policy_evaluation`]:
+    /// a governance change is not a thing policy decides about. §3.3 rejects it
+    /// unconditionally, and routing it through policy evaluation would be the
+    /// very indirection that lets an approval carry it through.
+    GovernancePath,
 }
 
 impl FindingKind {
@@ -359,6 +391,19 @@ pub fn reconcile(
         });
     }
 
+    let governance: Vec<&String> = changed.iter().filter(|p| is_governance_path(p)).collect();
+    for path in &governance {
+        findings.push(Finding {
+            kind: FindingKind::GovernancePath,
+            detail: format!(
+                "{path} is inside {GOVERNANCE_DIR}/, which §3.3 places in the \
+                 always-forbidden write scope; the change is rejected at \
+                 reconciliation and is never fetched"
+            ),
+            path: Some((*path).clone()),
+        });
+    }
+
     let contradiction = report_findings(report, &changed, &mut findings);
 
     let corrupt = !observed.health.is_healthy();
@@ -374,6 +419,11 @@ pub fn reconcile(
 
     let verdict = if corrupt {
         Verdict::Corrupt
+    } else if !governance.is_empty() {
+        // §3.3: "unconditionally". Above `CONTRADICTED` and `POLICY_SENSITIVE`
+        // on purpose — see [`Verdict::GovernanceViolation`] for why reusing
+        // `OUT_OF_SCOPE` cannot express this rule.
+        Verdict::GovernanceViolation
     } else if contradiction {
         Verdict::Contradicted
     } else if needs_policy {
@@ -394,6 +444,25 @@ pub fn reconcile(
         changed_paths: changed,
         findings,
     }
+}
+
+/// The repository-relative directory §3.1 puts project governance in.
+pub const GOVERNANCE_DIR: &str = ".conductor";
+
+/// Whether a repository-relative path is governance (§3.3 control 1).
+///
+/// **Segment-aware, not a substring or bare prefix test.** S10 found a boundary
+/// bug of exactly the shape this avoids — a string `strip_prefix` matched
+/// `/workspace-other` against `/workspace` — and the same mistake here would
+/// classify a sibling directory such as `.conductorized/` as governance, which
+/// would halt runs that touched nothing of the kind.
+///
+/// The bare name matches as well as the directory: a path that *is*
+/// `.conductor` is a file being written where the governance directory belongs,
+/// which is a change to governance by any reading.
+fn is_governance_path(path: &str) -> bool {
+    let path = path.strip_prefix("./").unwrap_or(path);
+    path == GOVERNANCE_DIR || path.starts_with(&format!("{GOVERNANCE_DIR}/"))
 }
 
 fn describe_corruption(observed: &Observed) -> String {

@@ -1,0 +1,46 @@
+# `unbound_criterion.yaml` with one key added: AC-3 is declared `manual: true`.
+#
+# §3.7's escape hatch — "mark it `manual: true`, which forces a review
+# boundary". The criterion still binds to no check and still cannot be satisfied
+# mechanically; what changes is that the plan now *says so*, and a validated
+# plan carrying a manual criterion reports `requires_human_review()`.
+#
+# The declaration is not a way to make the criterion cheaper. It is a way to
+# make it honest: an agent can never claim AC-3, because nothing an agent
+# produces is evidence for it.
+plan:
+  id: p-fixture
+  version: 3
+  objective: "A criterion a person must read, declared as one."
+  milestones:
+    - id: M-01
+      title: "Plan core"
+      slices:
+        - id: S-11
+          title: "Plan ledger"
+          tasks:
+            - id: T-0001
+              objective: "Model the plan document."
+              depends_on: []
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "The model deserialises the fixture plans."
+                  verified_by: [unit-tests]
+            - id: T-0002
+              objective: "Validate the plan document."
+              depends_on: [T-0001]
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "Every refusal names the offending id."
+                  verified_by: [unit-tests]
+                - id: AC-3
+                  statement: "The plan core works correctly."
+                  manual: true

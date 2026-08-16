@@ -53,3 +53,15 @@ copies of a number are two things that can disagree.
 | [ADR-0005](ADR-0005-claim-latency-is-load-dependent.md) | The claim holds under `rusqlite`; its latency trigger was measuring offered load | ACCEPTED |
 | [ADR-0006](ADR-0006-the-isolation-test-recipe-was-vacuous.md) | The master plan's own hostile-workspace test recipe was vacuous in two ways | ACCEPTED |
 | [ADR-0007](ADR-0007-blake3-is-the-only-digest.md) | BLAKE3 is the only content digest; the `sha256` column was incidental wording | ACCEPTED |
+| [ADR-0008](ADR-0008-progressed-called-a-regression-progress.md) | `progressed()` called a regression progress | ACCEPTED |
+| [ADR-0009](ADR-0009-the-repair-bound-must-be-durable.md) | The repair bound must be durable, not in-memory | ACCEPTED |
+| [ADR-0010](ADR-0010-the-deny-cap-is-scoped-to-a-rules-own-facts.md) | The deny cap is scoped to a rule's own `when:` facts | ACCEPTED |
+| [ADR-0011](ADR-0011-the-credential-boundary-had-two-holes-the-environment-cannot-close.md) | The credential boundary had two holes the environment cannot close | ACCEPTED |
+| [ADR-0012](ADR-0012-the-state-machine-could-not-express-two-refusals-it-was-required-to-make.md) | The state machine could not express two refusals it was required to make | ACCEPTED |
+| [ADR-0013](ADR-0013-completion-criterion-7-was-unreachable-behind-criterion-6.md) | Completion criterion 7 was unreachable behind criterion 6 | ACCEPTED |
+| [ADR-0014](ADR-0014-out-of-scope-could-not-express-unconditionally.md) | `OUT_OF_SCOPE` could not express "unconditionally" | ACCEPTED |
+| [ADR-0015](ADR-0015-approval-survives-the-store-as-a-receipt.md) | Approval survives the store as a receipt, not as a re-decision | ACCEPTED |
+
+*(ADR-0008 through ADR-0014 were absent from this index until S11 — the records
+existed, the table stopped at 0007. Recorded rather than silently fixed: an index
+nobody maintains is how a reader concludes a decision was never written down.)*

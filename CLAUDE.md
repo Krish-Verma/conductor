@@ -94,10 +94,16 @@ Do not violate these without an ADR that first shows a current acceptance-suite 
 
 ## Current status
 
-Design complete. **S0–S9 done. S10 (Codex adapter) not started.**
+Design complete. **S0–S11 done. S12 (packets and reports) not started.**
 
 S9 was the hard gate: no real coding agent runs through Conductor before it
-passes. It has, so S10 is unlocked.
+passes. It has. S10 shipped the Codex adapter; S11 shipped the plan ledger,
+decisions, and the §3.5 recovery path that makes "project truth outlives
+execution state" executable rather than aspirational.
+
+Keep this line current. It was stale from S1 through S11 in the master plan's
+own header and from S9 through S11 here, which is how a status note stops being
+information.
 
 `SECURITY.md` is the measured honesty table — no row may claim `PREVENTED`
 without a named passing test and a positive control.

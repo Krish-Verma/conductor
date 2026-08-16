@@ -1,0 +1,51 @@
+# Four different defects in one plan, one of each kind that the single-defect
+# fixtures isolate.
+#
+# The policy engine's `explain` doctrine — negative results are what people
+# debug — applies here too. A validator that returns the first defect makes
+# fixing a plan an N-round game of whack-a-mole against a machine that already
+# knows all N answers, so `validate` collects every defect it can find and this
+# fixture is what proves it.
+#
+#   1. T-0001 declares AC-1 twice.
+#   2. T-0002 depends on T-0009, which does not exist.
+#   3. T-0002's AC-1 binds to `does-not-exist`.
+#   4. T-0002's AC-9 binds to nothing and is not `manual`.
+plan:
+  id: p-fixture
+  version: 3
+  objective: "Everything wrong at once."
+  milestones:
+    - id: M-01
+      title: "Plan core"
+      slices:
+        - id: S-11
+          title: "Plan ledger"
+          tasks:
+            - id: T-0001
+              objective: "Model the plan document."
+              depends_on: []
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "The model deserialises the fixture plans."
+                  verified_by: [unit-tests]
+                - id: AC-1
+                  statement: "The model rejects a plan with no version."
+                  verified_by: [unit-tests]
+            - id: T-0002
+              objective: "Validate the plan document."
+              depends_on: [T-0009]
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "Every refusal names the offending id."
+                  verified_by: [does-not-exist]
+                - id: AC-9
+                  statement: "It all hangs together."

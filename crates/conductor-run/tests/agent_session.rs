@@ -67,6 +67,8 @@ fn config(world: &World) -> VerticalConfig {
         startup_grace: Duration::from_secs(30),
         sensitive: Default::default(),
         agent_env_extra: Default::default(),
+        // The fake agent authenticates against nothing.
+        credential_home: None,
         probe_key: conductor_run::containment::cache::ProbeKey::new(
             "fake", "test", "none", "n/a", "unprobed",
         ),

@@ -106,12 +106,20 @@ pub mod phase {
 pub struct Spawn {
     /// The child's process id.
     pub pid: i32,
-    /// The child's start time in microseconds since the epoch.
+    /// The child's start time in microseconds since the epoch, or `None` when
+    /// the kernel would not say.
     ///
     /// Recorded because a pid alone is not an identity: pids are recycled, and
     /// §4.7 step 3 requires "alive **and** start-time matches" before a recorded
     /// pid may be believed to be the same process.
-    pub pid_start_time: i64,
+    ///
+    /// `Option`, not a sentinel. The rejected alternative was `0` for "could not
+    /// read it", which reads back as a start time like any other and — because
+    /// `0` was also the value that asked `probe` to skip the check — turned "the
+    /// child was never identified" into "adopt whatever holds this pid". Absence
+    /// has to stay absent all the way to the column, so that every reader is
+    /// forced to decide what to do about it.
+    pub pid_start_time: Option<i64>,
 }
 
 /// How an attempt ended.
@@ -195,7 +203,7 @@ phase_impl!(phase::Reconciled, AttemptState::Reconciled, Termination);
 /// # use conductor_core::{AttemptId, RunId};
 /// let a = Attempt::create(AttemptId::new("a-1").unwrap(), RunId::new("r-1").unwrap(), 1);
 /// // CREATED has no process, so it cannot become ACTIVE.
-/// let _ = a.active(1, 1);
+/// let _ = a.active(1, Some(1));
 /// ```
 ///
 /// ```compile_fail
@@ -203,7 +211,7 @@ phase_impl!(phase::Reconciled, AttemptState::Reconciled, Termination);
 /// # use conductor_core::{AttemptId, RunId};
 /// let a = Attempt::create(AttemptId::new("a-1").unwrap(), RunId::new("r-1").unwrap(), 1)
 ///     .starting()
-///     .active(1, 1);
+///     .active(1, Some(1));
 /// // §5.2: RECONCILING is unskippable. ACTIVE cannot reach RECONCILED.
 /// let _ = a.reconciled();
 /// ```
@@ -213,7 +221,7 @@ phase_impl!(phase::Reconciled, AttemptState::Reconciled, Termination);
 /// # use conductor_core::{AttemptId, RunId};
 /// let a = Attempt::create(AttemptId::new("a-1").unwrap(), RunId::new("r-1").unwrap(), 1)
 ///     .starting()
-///     .active(1, 1);
+///     .active(1, Some(1));
 /// // …nor may a run leave RUNNING on the evidence of an attempt still running.
 /// let _ = a.evidence();
 /// ```
@@ -226,7 +234,7 @@ phase_impl!(phase::Reconciled, AttemptState::Reconciled, Termination);
 /// # use conductor_core::attempt::{Attempt, AttemptState};
 /// # use conductor_core::{AttemptId, RunId, RunState};
 /// let a = Attempt::create(AttemptId::new("a-1").unwrap(), RunId::new("r-1").unwrap(), 1);
-/// let a = a.starting().active(1, 1);
+/// let a = a.starting().active(1, Some(1));
 /// assert_eq!(a.state(), AttemptState::Active);
 /// let a = a.exited(0);                       // ACTIVE → terminal, legally
 /// let evidence = a.evidence();               // evidence() exists on a terminal
@@ -294,7 +302,12 @@ impl Attempt<phase::Created> {
 
 impl Attempt<phase::Starting> {
     /// `STARTING → ACTIVE`: a process exists and this is its identity.
-    pub fn active(self, pid: i32, pid_start_time: i64) -> Attempt<phase::Active> {
+    ///
+    /// `pid_start_time` is `None` when the process exists but its start time
+    /// could not be read. The attempt is still `ACTIVE` — a child is running and
+    /// pretending otherwise would lose it — but recovery will refuse to adopt it
+    /// later, because half of §4.7 step 3's question has no answer.
+    pub fn active(self, pid: i32, pid_start_time: Option<i64>) -> Attempt<phase::Active> {
         self.move_to::<phase::Active>(Spawn {
             pid,
             pid_start_time,
@@ -325,8 +338,9 @@ impl Attempt<phase::Active> {
         self.data.pid
     }
 
-    /// The child's start time, microseconds since the epoch.
-    pub fn pid_start_time(&self) -> i64 {
+    /// The child's start time, microseconds since the epoch, or `None` when it
+    /// could not be read.
+    pub fn pid_start_time(&self) -> Option<i64> {
         self.data.pid_start_time
     }
 

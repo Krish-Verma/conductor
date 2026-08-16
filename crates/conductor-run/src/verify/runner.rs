@@ -212,14 +212,40 @@ impl VerificationReport {
     /// mapping would drop by forgetting to carry `tree_hash`.
     pub fn checks_evidence(&self, kind: CheckKind) -> conductor_core::completion::ChecksEvidence {
         conductor_core::completion::ChecksEvidence::new(
-            self.results.iter().filter(|r| r.kind == kind).map(|r| {
-                conductor_core::completion::CheckEvidence {
-                    check_id: r.check_id.clone(),
-                    outcome: r.outcome,
-                    tree_hash: r.tree_hash.clone(),
-                }
-            }),
+            self.results
+                .iter()
+                .filter(|r| r.kind == kind)
+                .map(Self::evidence),
         )
+    }
+
+    /// The results for a named set of check ids, in the same shape.
+    ///
+    /// §4.5's criterion 5 binds an acceptance criterion to check **ids** rather
+    /// than to a kind — a criterion may name a required check and an invariant
+    /// in one breath — so it cannot use [`VerificationReport::checks_evidence`].
+    /// It must not grow a second mapping either, for the reason that one
+    /// documents: the field a hand-rolled mapping drops is `tree_hash`, and
+    /// dropping it is exactly how a criterion gets satisfied by a pass from two
+    /// edits ago.
+    pub fn evidence_for(
+        &self,
+        check_ids: &[String],
+    ) -> Vec<conductor_core::completion::CheckEvidence> {
+        self.results
+            .iter()
+            .filter(|r| check_ids.contains(&r.check_id))
+            .map(Self::evidence)
+            .collect()
+    }
+
+    /// One result, as the completion gate reads it.
+    fn evidence(result: &CheckResult) -> conductor_core::completion::CheckEvidence {
+        conductor_core::completion::CheckEvidence {
+            check_id: result.check_id.clone(),
+            outcome: result.outcome,
+            tree_hash: result.tree_hash.clone(),
+        }
     }
 }
 

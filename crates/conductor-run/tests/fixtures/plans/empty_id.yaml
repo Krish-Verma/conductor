@@ -1,0 +1,41 @@
+# `valid.yaml` with one defect: the second task's id is whitespace.
+#
+# §3.6's ids are "assigned once, never reused" and they are how everything else
+# in Conductor addresses a task — dependencies, findings, commit trailers,
+# approval bindings. A blank id addresses nothing, and it silently defeats the
+# duplicate-id rule too: two blank ids are equal, so a validator that trimmed
+# nothing would report "duplicate id ``" and a validator that trimmed
+# everything would report nothing at all.
+plan:
+  id: p-fixture
+  version: 3
+  objective: "A task with no usable id."
+  milestones:
+    - id: M-01
+      title: "Plan core"
+      slices:
+        - id: S-11
+          title: "Plan ledger"
+          tasks:
+            - id: T-0001
+              objective: "Model the plan document."
+              depends_on: []
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "The model deserialises the fixture plans."
+                  verified_by: [unit-tests]
+            - id: "   "
+              objective: "Validate the plan document."
+              depends_on: []
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "Every refusal names the offending id."
+                  verified_by: [unit-tests]

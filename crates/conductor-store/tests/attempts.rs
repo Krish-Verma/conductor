@@ -72,7 +72,7 @@ fn the_supervisor_records_starting_then_active_with_the_process_identity() {
         .expect("starting");
     assert_eq!(state_of(&store, "a-0001"), "STARTING");
 
-    let attempt = attempt.active(4242, 1_786_604_521_844_678);
+    let attempt = attempt.active(4242, Some(1_786_604_521_844_678));
     store
         .record_attempt_active(&fence, &attempt, NOW + 2)
         .expect("active");
@@ -95,6 +95,36 @@ fn the_supervisor_records_starting_then_active_with_the_process_identity() {
 }
 
 #[test]
+fn a_spawn_whose_start_time_could_not_be_read_persists_null_and_never_a_zero() {
+    // §4.7 step 3 probes "alive **and** start-time matches?". A start time the
+    // supervisor could not read is an unanswerable second half, and the column
+    // has to say so. `0` would not: it is a value, it compares, and it is the
+    // one value [`conductor_run::supervise::probe`] used to read as "do not
+    // check" — so persisting it turns "we could not identify the child" into
+    // "adopt whatever holds this pid".
+    let (_dir, mut store) = common::temp_store();
+    let fence = claimed(&mut store);
+
+    let attempt = store
+        .create_attempt(&fence, new_attempt(1), NOW)
+        .expect("create")
+        .starting()
+        .active(4242, None);
+    store
+        .record_attempt_active(&fence, &attempt, NOW + 1)
+        .expect("active");
+
+    let rows = store.attempts_for_run(fence.run_id()).expect("query");
+    let row = rows.first().expect("a row");
+    assert_eq!(
+        row.pid,
+        Some(4242),
+        "the pid is still evidence; only the identity is missing"
+    );
+    assert_eq!(row.pid_start_time, None);
+}
+
+#[test]
 fn a_terminal_attempt_records_state_and_outcome_separately() {
     let (_dir, mut store) = common::temp_store();
     let fence = claimed(&mut store);
@@ -102,7 +132,7 @@ fn a_terminal_attempt_records_state_and_outcome_separately() {
         .create_attempt(&fence, new_attempt(1), NOW)
         .expect("create")
         .starting()
-        .active(1, 1);
+        .active(1, Some(1));
 
     let crashed = attempt.signalled(9);
     store
@@ -140,7 +170,7 @@ fn a_stale_attempt_never_acquires_an_exit_code() {
         .create_attempt(&fence, new_attempt(1), NOW)
         .expect("create")
         .starting()
-        .active(1, 1)
+        .active(1, Some(1))
         .stale();
 
     store
@@ -171,7 +201,7 @@ fn reconciled_keeps_the_outcome_the_attempt_actually_had() {
         .create_attempt(&fence, new_attempt(1), NOW)
         .expect("create")
         .starting()
-        .active(1, 1)
+        .active(1, Some(1))
         .timed_out_idle();
     store
         .record_attempt_terminal(&fence, &attempt, NOW + 5)
@@ -251,7 +281,7 @@ fn in_flight_attempts_are_what_recovery_reads() {
         .create_attempt(&fence, new_attempt(1), NOW)
         .expect("create")
         .starting()
-        .active(9911, 12345);
+        .active(9911, Some(12345));
     store
         .record_attempt_active(&fence, &attempt, NOW)
         .expect("active");
@@ -331,6 +361,6 @@ fn the_typestate_and_the_column_agree_on_every_state() {
     assert_eq!(a.state().as_str(), names[0]);
     let a = a.starting();
     assert_eq!(a.state().as_str(), names[1]);
-    let a = a.active(1, 1);
+    let a = a.active(1, Some(1));
     assert_eq!(a.state().as_str(), names[2]);
 }

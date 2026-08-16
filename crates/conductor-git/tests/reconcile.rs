@@ -612,3 +612,79 @@ fn only_the_two_clean_verdicts_satisfy_completion_criterion_six() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// §3.3 control 1 — `.conductor/**` arriving on a run branch (acceptance row 29)
+//
+// > `.conductor/**` is in the always-forbidden write scope. Any change to it
+// > arriving on a run branch is **rejected at reconciliation, unconditionally**,
+// > with a finding. Conductor never fetches such a change.
+//
+// "Unconditionally" is the load-bearing word, and it is why this is a verdict of
+// its own rather than a reuse of `OUT_OF_SCOPE`. §4.8's precedence puts
+// `POLICY_SENSITIVE` and `CONTRADICTED` *above* `OUT_OF_SCOPE`, so an agent that
+// edited `.conductor/policy.yaml` while also touching a lockfile would classify
+// as `POLICY_SENSITIVE` — and a human granting the dependency would then advance
+// a run carrying a governance mutation. That is the precise subversion §3.3's
+// three controls exist to prevent.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_governance_file_written_on_a_run_branch_is_refused_unconditionally() {
+    let run = run();
+    write(run.path(), ".conductor/plans/v1/APPROVED", "forged\n");
+    let result = classify(&run, &["**"]);
+    assert_eq!(result.verdict, Verdict::GovernanceViolation, "{result:?}");
+    assert!(
+        result
+            .findings()
+            .iter()
+            .any(|f| f.kind == FindingKind::GovernancePath
+                && f.path.as_deref() == Some(".conductor/plans/v1/APPROVED")),
+        "the finding must name the path: {:?}",
+        result.findings()
+    );
+}
+
+#[test]
+fn a_governance_change_outranks_a_policy_sensitive_one_arriving_with_it() {
+    // The precedence case. Without its own verdict this classifies as
+    // POLICY_SENSITIVE, which routes to approval — and an approved dependency
+    // would carry the governance edit along with it.
+    let run = run();
+    write(
+        run.path(),
+        ".conductor/policy.yaml",
+        "policy:\n  rules: []\n",
+    );
+    write(run.path(), "Cargo.lock", "# lockfile\n");
+    let result = classify(&run, &["**"]);
+    assert_eq!(result.verdict, Verdict::GovernanceViolation, "{result:?}");
+}
+
+#[test]
+fn a_path_that_merely_begins_with_the_governance_prefix_is_not_governance() {
+    // S10 found a boundary bug of exactly this shape, where `/workspace-other`
+    // matched `/workspace`. A sibling directory is not the governance directory.
+    let run = run();
+    write(run.path(), ".conductorized/notes.md", "ordinary\n");
+    let result = classify(&run, &["**"]);
+    assert_ne!(result.verdict, Verdict::GovernanceViolation, "{result:?}");
+    assert!(
+        !result
+            .findings()
+            .iter()
+            .any(|f| f.kind == FindingKind::GovernancePath),
+        "{:?}",
+        result.findings()
+    );
+}
+
+#[test]
+fn an_ordinary_source_edit_is_still_clean_when_governance_is_untouched() {
+    // Positive control: the rule must refuse governance changes, not everything.
+    let run = run();
+    write(run.path(), "src/added.rs", "pub fn added() {}\n");
+    let result = classify(&run, &["**"]);
+    assert_eq!(result.verdict, Verdict::CleanNoReport, "{result:?}");
+}

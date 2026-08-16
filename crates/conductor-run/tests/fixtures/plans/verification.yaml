@@ -1,0 +1,20 @@
+# The check catalogue the plan fixtures bind to — master plan §4.5's shape.
+#
+# §3.7 refuses "verification IDs absent from `verification.yaml`", so the
+# validator has to be told which check ids exist. This file is that set for the
+# plan fixtures: `typecheck`, `unit-tests` and `no-secrets`, and deliberately
+# nothing called `does-not-exist`.
+verification:
+  toolchain_fingerprint:
+    - "rustc --version"
+  required:
+    - id: typecheck
+      command: cargo check --all-targets
+      timeout_seconds: 600
+      on_timeout: inconclusive
+    - id: unit-tests
+      command: cargo test
+      timeout_seconds: 1200
+  invariants:
+    - id: no-secrets
+      command: conductor scan secrets

@@ -315,6 +315,8 @@ fn config(world: &World) -> VerticalConfig {
         startup_grace: Duration::from_secs(30),
         sensitive: conductor_git::SensitivePatterns::default(),
         agent_env_extra: Default::default(),
+        // The fake agent authenticates against nothing.
+        credential_home: None,
         // No `execution_requirements` on these fixtures' tasks, so §4.2's
         // gate compares an empty vector and proceeds without a probe.
         probe_key: conductor_run::containment::cache::ProbeKey::new(

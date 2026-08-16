@@ -1,0 +1,60 @@
+# `valid.yaml` plus `risk_tier: high` on T-0002 — a key this Conductor has never
+# heard of, standing in for a field a later Conductor adds.
+#
+# Two things must both be true of this file, and they pull in opposite
+# directions:
+#
+#   * It **loads**. `conductor_core::TaskSpec` states the reason — "a spec
+#     written for a later Conductor must still load; the fields it does not know
+#     about are the later Conductor's business" — and §2.2 forbids
+#     `deny_unknown_fields` outright. A plan that a newer Conductor wrote and an
+#     older one refuses to read is a plan that does not survive the trip
+#     §3.2 requires it to survive.
+#
+#   * It **hashes differently** from `valid.yaml`. The hash is computed over the
+#     whole parsed document, not over the subset this version models, because
+#     §3.3 puts `.conductor/` inside the agent's own workspace. If unmodelled
+#     keys were invisible to the hash, an agent could append a field that a
+#     later Conductor honours and the approval that covered `valid.yaml` would
+#     still cover it.
+plan:
+  id: p-fixture
+  version: 3
+  objective: "Prove that the S11 plan core accepts a well-formed plan."
+  milestones:
+    - id: M-01
+      title: "Plan core"
+      slices:
+        - id: S-11
+          title: "Plan ledger"
+          tasks:
+            - id: T-0001
+              objective: "Model the plan document."
+              rationale: "Nothing downstream can be checked until the shape exists."
+              depends_on: []
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              attempt_budget: 3
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "The model deserialises the fixture plans."
+                  verified_by: [unit-tests]
+            - id: T-0002
+              objective: "Validate the plan document."
+              rationale: "An unbound criterion is how a task completes on an agent's word."
+              depends_on: [T-0001]
+              risk_tier: high
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              attempt_budget: 3
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "Every refusal names the offending id."
+                  verified_by: [unit-tests, typecheck]
+                - id: AC-2
+                  statement: "No secret reaches the validation report."
+                  verified_by: [no-secrets]

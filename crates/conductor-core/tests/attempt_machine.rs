@@ -59,10 +59,10 @@ fn the_happy_path_walks_created_starting_active_exited_reconciled() {
     let a = a.starting();
     assert_eq!(a.state(), AttemptState::Starting);
 
-    let a = a.active(4242, 1_786_604_521_844_678);
+    let a = a.active(4242, Some(1_786_604_521_844_678));
     assert_eq!(a.state(), AttemptState::Active);
     assert_eq!(a.pid(), 4242);
-    assert_eq!(a.pid_start_time(), 1_786_604_521_844_678);
+    assert_eq!(a.pid_start_time(), Some(1_786_604_521_844_678));
 
     let a = a.exited(0);
     assert_eq!(a.state(), AttemptState::Exited);
@@ -75,10 +75,10 @@ fn the_happy_path_walks_created_starting_active_exited_reconciled() {
 
 #[test]
 fn a_nonzero_exit_is_crashed_and_a_zero_exit_is_not() {
-    let a = created().starting().active(1, 1).exited(0);
+    let a = created().starting().active(1, Some(1)).exited(0);
     assert_eq!(a.state(), AttemptState::Exited);
 
-    let a = created().starting().active(1, 1).exited(7);
+    let a = created().starting().active(1, Some(1)).exited(7);
     assert_eq!(
         a.state(),
         AttemptState::Crashed,
@@ -89,7 +89,7 @@ fn a_nonzero_exit_is_crashed_and_a_zero_exit_is_not() {
 
 #[test]
 fn a_signal_death_is_crashed_and_records_the_signal() {
-    let a = created().starting().active(1, 1).signalled(9);
+    let a = created().starting().active(1, Some(1)).signalled(9);
     assert_eq!(a.state(), AttemptState::Crashed);
     assert_eq!(a.signal(), Some(9));
     assert_eq!(a.exit_code(), None);
@@ -97,7 +97,7 @@ fn a_signal_death_is_crashed_and_records_the_signal() {
 
 #[test]
 fn stale_is_not_crashed_because_unknown_is_not_known() {
-    let stale = created().starting().active(1, 1).stale();
+    let stale = created().starting().active(1, Some(1)).stale();
     assert_eq!(stale.state(), AttemptState::Stale);
     assert_eq!(stale.outcome(), AttemptOutcome::Stale);
     // The distinction §5.2 insists on: no exit was observed, so neither an exit
@@ -110,19 +110,27 @@ fn stale_is_not_crashed_because_unknown_is_not_known() {
 #[test]
 fn every_terminal_outcome_reaches_reconciled() {
     let outcomes = [
-        created().starting().active(1, 1).exited(0).reconciled(),
-        created().starting().active(1, 1).exited(3).reconciled(),
         created()
             .starting()
-            .active(1, 1)
+            .active(1, Some(1))
+            .exited(0)
+            .reconciled(),
+        created()
+            .starting()
+            .active(1, Some(1))
+            .exited(3)
+            .reconciled(),
+        created()
+            .starting()
+            .active(1, Some(1))
             .timed_out_wall()
             .reconciled(),
         created()
             .starting()
-            .active(1, 1)
+            .active(1, Some(1))
             .timed_out_idle()
             .reconciled(),
-        created().starting().active(1, 1).stale().reconciled(),
+        created().starting().active(1, Some(1)).stale().reconciled(),
     ];
     for a in outcomes {
         assert_eq!(a.state(), AttemptState::Reconciled);
@@ -131,12 +139,12 @@ fn every_terminal_outcome_reaches_reconciled() {
 
 #[test]
 fn a_timeout_is_timed_out_and_carries_its_reason() {
-    let wall = created().starting().active(1, 1).timed_out_wall();
+    let wall = created().starting().active(1, Some(1)).timed_out_wall();
     assert_eq!(wall.state(), AttemptState::TimedOut);
     assert_eq!(wall.outcome(), AttemptOutcome::TimedOut);
     assert_eq!(wall.timeout_reason(), Some("wall_clock"));
 
-    let idle = created().starting().active(1, 1).timed_out_idle();
+    let idle = created().starting().active(1, Some(1)).timed_out_idle();
     assert_eq!(idle.state(), AttemptState::TimedOut);
     // §6.4: "no output for idle_timeout → TIMED_OUT, reason=stall".
     assert_eq!(idle.timeout_reason(), Some("stall"));
@@ -154,18 +162,18 @@ fn spawning_can_fail_before_the_process_exists_and_that_is_not_a_crash() {
 
 #[test]
 fn a_run_can_only_leave_running_by_going_to_reconciling() {
-    let terminal: TerminalAttempt = created().starting().active(1, 1).exited(0).evidence();
+    let terminal: TerminalAttempt = created().starting().active(1, Some(1)).exited(0).evidence();
     assert_eq!(RunState::leave_running(&terminal), RunState::Reconciling);
 
     // …and that holds for every terminal outcome, including the ones a naive
     // implementation would be tempted to route straight to COMPLETE.
     for t in [
-        created().starting().active(1, 1).exited(0).evidence(),
-        created().starting().active(1, 1).exited(9).evidence(),
-        created().starting().active(1, 1).stale().evidence(),
+        created().starting().active(1, Some(1)).exited(0).evidence(),
+        created().starting().active(1, Some(1)).exited(9).evidence(),
+        created().starting().active(1, Some(1)).stale().evidence(),
         created()
             .starting()
-            .active(1, 1)
+            .active(1, Some(1))
             .timed_out_wall()
             .evidence(),
     ] {
@@ -175,7 +183,7 @@ fn a_run_can_only_leave_running_by_going_to_reconciling() {
 
 #[test]
 fn terminal_evidence_names_the_attempt_it_came_from() {
-    let a = created().starting().active(77, 5).exited(0);
+    let a = created().starting().active(77, Some(5)).exited(0);
     let evidence = a.evidence();
     assert_eq!(evidence.attempt_id().as_str(), "a-0001");
     assert_eq!(evidence.outcome(), AttemptOutcome::Exited);

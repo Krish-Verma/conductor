@@ -32,10 +32,10 @@ use std::time::Duration;
 
 use conductor_agent::AgentAdapter;
 use conductor_core::completion::{
-    AcceptanceEvidence, CompletionEvidence, FindingsEvidence, PolicyEvidence,
+    AcceptanceEvidence, CompletionEvidence, CriterionEvidence, FindingsEvidence, PolicyEvidence,
     ReconciliationEvidence, Refusal, Slice, VerifiedComplete,
 };
-use conductor_core::{Fence, ReconciledRoute, RunId, RunState, TaskId, TaskState};
+use conductor_core::{Fence, PlanVersionId, ReconciledRoute, RunId, RunState, TaskId, TaskState};
 use conductor_git::integrate::{FetchedRef, MadeCommit, Trailer, Trailers};
 use conductor_git::{Scope, SensitivePatterns, TreeHasher};
 use conductor_store::Store;
@@ -96,6 +96,10 @@ pub struct VerticalConfig {
     pub sensitive: SensitivePatterns,
     /// Extra environment variables the agent is given (§4.9's allowlist).
     pub agent_env_extra: std::collections::BTreeMap<String, String>,
+    /// The credential directory this adapter needs materialised inside the run's
+    /// workspace, if it needs one — see
+    /// [`crate::enforce::env::CredentialHomeRequest`].
+    pub credential_home: Option<crate::enforce::env::CredentialHomeRequest>,
     /// Which (adapter × launcher × host) measurement §4.2's gate reads.
     ///
     /// Not `Option`, and not the task's *requirements* — those are durable on
@@ -258,10 +262,31 @@ pub fn run_task_with_session(
         .task(&config.task_id)?
         .ok_or_else(|| WorkerError::Adapter(format!("no task {}", config.task_id)))?;
 
-    // §5.2: `PENDING ──deps met──► READY`. S5 has no dependency graph — that is
-    // S11's, with the plan ledger — so "deps met" is vacuously true and is
-    // written as one step rather than assumed away.
+    // §5.2: `PENDING ──deps met──► READY`. S5 wrote this as one unconditional
+    // step because there was no dependency graph to consult; **S11's
+    // materializer writes `task.depends_on`**, so "deps met" is now a question
+    // with an answer, asked here because here is where §5.2 draws the edge.
+    //
+    // A task whose dependencies are unmet stays **`PENDING`**, and the caller
+    // gets an error rather than a `Vertical`. Not `BLOCKED`: §5.2's fifth
+    // correction gives `BLOCKED` only `→ CANCELLED` and `→ SUPERSEDED`, so
+    // blocking a task that is merely waiting would strand it permanently the
+    // moment its dependency finished. `PENDING` is precisely the state that
+    // becomes `READY` on the next pass, which is what "not yet" means.
+    //
+    // Only on this edge. `COMPLETE` is terminal (§5.2), so a dependency that
+    // was met once cannot become unmet, and re-asking on `READY → RUNNING`
+    // would be a second place the rule lives.
     if task.state == TaskState::Pending {
+        let unmet = unmet_dependencies(store, &config.task_id)?;
+        if !unmet.is_empty() {
+            return Err(WorkerError::Adapter(format!(
+                "task {} is not claimable: §5.2 moves PENDING → READY only once \
+                 its dependencies are COMPLETE, and {}",
+                config.task_id,
+                unmet.join("; ")
+            )));
+        }
         store.set_task_state(&config.task_id, TaskState::Ready)?;
     }
 
@@ -318,6 +343,7 @@ pub fn run_task_with_session(
         scope,
         sensitive: config.sensitive.clone(),
         agent_env_extra: config.agent_env_extra.clone(),
+        credential_home: config.credential_home.clone(),
         agent_session_id: session.map(str::to_string),
     };
     let attempt = run_one_attempt(
@@ -604,9 +630,7 @@ fn finish(
         conditional: report.checks_evidence(CheckKind::Conditional),
         invariants: report.checks_evidence(CheckKind::Invariant),
         findings: FindingsEvidence::unresolved(blocking_findings(store, &run_id)?),
-        acceptance: AcceptanceEvidence::NotEvaluated {
-            owner: Slice::S11PlanLedger,
-        },
+        acceptance: acceptance_evidence(store, &config.task_id, &report)?,
         reconciliation,
         policy,
     };
@@ -677,7 +701,7 @@ fn finish(
         // The policy hash comes from the claim, which read it off the run row
         // inside the claiming transaction — the same snapshot the run is
         // executing under (acceptance row 23: "run keeps `policy_hash`").
-        trailers: trailers_for(&run_id, policy_hash, &report),
+        trailers: trailers_for(&run_id, policy_hash, &report, plan_trailer(store, task)?),
     };
 
     match integrate(
@@ -844,26 +868,174 @@ fn blocking_findings(store: &Store, run_id: &RunId) -> Result<usize, WorkerError
         .count())
 }
 
-/// §3.4's trailers, **as far as they have a real source at S5**.
+/// §4.5's criterion 5, read off the task row S11's materializer wrote.
+///
+/// # The three answers, and why `NULL` is not one of the other two
+///
+/// `task.acceptance_criteria` is nullable, and schema v8 spells out what the
+/// two absences mean: `NULL` is *"no plan document has ever been read for this
+/// task"* — every row created before S11, including every fixture that
+/// hand-seeds one — and `'[]'` is *"a plan was read and its author declared
+/// none"*. They lead to opposite statements at this gate, so they map to
+/// different variants: `NULL` keeps deferring criterion 5, `'[]'` answers it.
+/// Defaulting an absent column to `'[]'` would let a row nobody has ever
+/// checked report itself as checked and found empty.
+///
+/// # A column that will not decode stops the run
+///
+/// Not "treat it as empty", which is the same permissive default one step
+/// later. The only writer of these bytes is
+/// [`crate::plan::materialize`], so an undecodable payload means the row has
+/// been edited outside Conductor or the database is damaged — and neither is
+/// evidence that this task has no criteria to satisfy. The run stops in
+/// `VERIFYING` with its lease left to expire, exactly as a profile that cannot
+/// be loaded does.
+fn acceptance_evidence(
+    store: &Store,
+    task_id: &TaskId,
+    report: &VerificationReport,
+) -> Result<AcceptanceEvidence, WorkerError> {
+    let Some(json) = store.acceptance_criteria(task_id)? else {
+        return Ok(AcceptanceEvidence::NotEvaluated {
+            owner: Slice::S11PlanLedger,
+        });
+    };
+    // The plan model owns this shape, and decoding into it here is what schema
+    // v8 means by "decoded by the code that owns the shape": `conductor-store`
+    // deliberately hands the column back as text rather than inventing a second
+    // definition of what an acceptance criterion looks like.
+    let declared: Vec<crate::plan::model::AcceptanceCriterion> = serde_json::from_str(&json)
+        .map_err(|e| {
+            WorkerError::Adapter(format!(
+                "task {task_id} has an acceptance_criteria column that does not \
+                 decode ({e}); a column that cannot be read is not evidence that \
+                 there is nothing to bind, so this run stops rather than \
+                 completing against criteria nobody could check"
+            ))
+        })?;
+    if declared.is_empty() {
+        return Ok(AcceptanceEvidence::NoCriteria);
+    }
+    Ok(AcceptanceEvidence::Evaluated {
+        criteria: declared
+            .into_iter()
+            .map(|criterion| CriterionEvidence {
+                results: report.evidence_for(&criterion.verified_by),
+                id: criterion.id,
+                manual: criterion.manual,
+                verified_by: criterion.verified_by,
+            })
+            .collect(),
+    })
+}
+
+/// Which of a task's declared dependencies have not reached `COMPLETE` —
+/// §5.2's `PENDING ──deps met──► READY`.
+///
+/// An empty vector means the edge may be taken. `NULL` in the column is Ruling
+/// 4's *"never materialized from a plan"*, which is not the same claim as "this
+/// task declares no dependencies" but leads to the same edge here: a row no
+/// plan wrote has no dependency graph to consult, and refusing every pre-S11
+/// task would stop work that is not waiting for anything.
+///
+/// Everything else is fail-closed. A dependency with no row, or an id the store
+/// could not even address, counts as **unmet** rather than as satisfied: §3.7
+/// refuses dangling dependencies at validation, so one reaching this far means
+/// the row and the plan disagree, and that is not a disagreement to resolve by
+/// picking the permissive reading.
+fn unmet_dependencies(store: &Store, task_id: &TaskId) -> Result<Vec<String>, WorkerError> {
+    let Some(json) = store.depends_on(task_id)? else {
+        return Ok(Vec::new());
+    };
+    let declared: Vec<String> = serde_json::from_str(&json).map_err(|e| {
+        WorkerError::Adapter(format!(
+            "task {task_id} has a depends_on column that does not decode ({e}); \
+             an unreadable dependency list is not an empty one"
+        ))
+    })?;
+
+    let mut unmet = Vec::new();
+    for id in declared {
+        let Ok(dependency) = TaskId::new(id.clone()) else {
+            unmet.push(format!("{id:?} is not a usable task id"));
+            continue;
+        };
+        match store.task(&dependency)? {
+            Some(row) if row.state == TaskState::Complete => {}
+            Some(row) => unmet.push(format!("{dependency} is {}", row.state)),
+            None => unmet.push(format!("{dependency} has no task row")),
+        }
+    }
+    Ok(unmet)
+}
+
+/// §3.4's `Conductor-Plan: v<N>@<content-hash>`, for the plan version this
+/// task's row was materialized under.
+///
+/// Both halves come from the `plan_version` row rather than from the row id:
+/// §3.5's recovery story is that a reader with only the repository can
+/// reconstruct "which run, plan version, policy snapshot and approval produced
+/// every Conductor-authored commit", and `pv-1` tells that reader nothing about
+/// which document to re-hash. The version says where to look and the content
+/// hash says whether what they found is the same document.
+///
+/// `None` — and therefore no trailer — when the row cannot be found. §5.1 makes
+/// `task.plan_version_id` a foreign key, so this is unreachable through the
+/// schema; if it ever happens, an absent trailer is the honest answer and an
+/// invented one is the damaging one, for the reason [`trailers_for`] gives.
+fn plan_trailer(
+    store: &Store,
+    task: &conductor_store::TaskRow,
+) -> Result<Option<Trailer>, WorkerError> {
+    let Ok(id) = PlanVersionId::new(task.plan_version_id.clone()) else {
+        return Ok(None);
+    };
+    let Some(plan) = store.plan_version(&id)? else {
+        return Ok(None);
+    };
+    Ok(Some(Trailer::new(
+        "Conductor-Plan",
+        format!("v{}@{}", plan.version, plan.content_hash),
+    )))
+}
+
+/// §3.4's trailers, **as far as they have a real source**.
 ///
 /// | trailer | source | status |
 /// |---|---|---|
 /// | `Conductor-Run` | `run.id` | emitted |
+/// | `Conductor-Plan` | `plan_version.version` + `.content_hash` (S11) | emitted |
 /// | `Conductor-Policy` | `run.policy_hash` | emitted |
 /// | `Conductor-Verification` | digest of the evidence the gate read | emitted |
-/// | `Conductor-Plan` | plan versioning — **S11** | absent |
-/// | `Conductor-Approval` | approvals — **S8** | absent |
+/// | `Conductor-Approval` | the grant and its binding | absent |
 ///
 /// §3.4's purpose is that the audit trail "survives total local state loss".
 /// A trailer with a value nobody can reproduce actively damages that: a reader
 /// recovering from total loss has no way to tell an invented hash from a real
 /// one, so every trailer becomes suspect. Absent is honest; invented is not.
-fn trailers_for(run_id: &RunId, policy_hash: &str, report: &VerificationReport) -> Trailers {
-    Trailers::new([
-        Trailer::new("Conductor-Run", run_id.as_str()),
-        Trailer::new("Conductor-Policy", policy_hash),
-        Trailer::new("Conductor-Verification", report.evidence_digest()),
-    ])
+///
+/// That is why `Conductor-Approval` is still absent although S8 built grants:
+/// §3.4's value is `AG-0019 binding=blake3:7d31…`, and a run that consumed no
+/// grant has no id and no binding to put there. The trailer is owed to the
+/// commit produced by a run that *did*, which is a different thing from the
+/// mechanism existing.
+///
+/// The order is §3.4's listing order, so a `git log` of a Conductor commit
+/// reads the way the master plan writes it.
+fn trailers_for(
+    run_id: &RunId,
+    policy_hash: &str,
+    report: &VerificationReport,
+    plan: Option<Trailer>,
+) -> Trailers {
+    let mut trailers = vec![Trailer::new("Conductor-Run", run_id.as_str())];
+    trailers.extend(plan);
+    trailers.push(Trailer::new("Conductor-Policy", policy_hash));
+    trailers.push(Trailer::new(
+        "Conductor-Verification",
+        report.evidence_digest(),
+    ));
+    Trailers::new(trailers)
 }
 
 /// Notified as the vertical passes a point a crash matters at.

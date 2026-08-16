@@ -1,0 +1,32 @@
+# `valid.yaml` with one addition: T-0001 declares an action outside §4.4's
+# twenty-two-name taxonomy.
+#
+# This fixture must *validate*. §3.7 is a closed list and does not name
+# "unknown action" as a refusal, and §4.4 already floors an unrecognised
+# action at `deny` when it is evaluated — `Action::parse` is infallible and
+# yields `Action::Unknown`, which `Action::floor()` denies. Refusing it here
+# too would be a second gate on the same question that can drift from the
+# first, so the taxonomy check belongs at evaluation, not at validate.
+plan:
+  id: p-fixture
+  version: 3
+  objective: "A task declaring an action the taxonomy has never heard of."
+  milestones:
+    - id: M-01
+      title: "Plan core"
+      slices:
+        - id: S-11
+          title: "Plan ledger"
+          tasks:
+            - id: T-0001
+              objective: "Model the plan document."
+              depends_on: []
+              actions: ["telepathy.persuade"]
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "The model deserialises the fixture plans."
+                  verified_by: [unit-tests]

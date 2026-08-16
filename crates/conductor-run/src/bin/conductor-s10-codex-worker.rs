@@ -135,6 +135,10 @@ fn main() {
         // else. For Codex this carries `CODEX_HOME`; for the replay harness it
         // carries the fixture to replay.
         agent_env_extra: agent_env(&args),
+        // The crash matrix passes an already-built `CODEX_HOME` through
+        // `--agent-env`, because what it is killing is Conductor, not the
+        // credential boundary. `conductor task run` uses the other door.
+        credential_home: None,
         // One attempt; §4.6's session policy is repair's.
         agent_session_id: None,
     };

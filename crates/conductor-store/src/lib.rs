@@ -8,6 +8,7 @@ pub mod attempt;
 pub mod claim;
 pub mod error;
 pub mod lease;
+pub mod ledger;
 pub mod migrate;
 pub mod repair;
 pub mod run;
@@ -21,8 +22,8 @@ use std::path::{Path, PathBuf};
 
 use conductor_core::effect::{OperationId, Precondition, SideEffectKind, SideEffectState};
 use conductor_core::{
-    AttemptId, EventKind, Fence, ReconciledRoute, RunId, RunState, TaskId, TaskState,
-    TerminalAttempt,
+    AttemptId, EventKind, Fence, PlanVersionId, PlanVersionState, ProjectId, ReconciledRoute,
+    RunId, RunState, TaskId, TaskState, TerminalAttempt,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -30,6 +31,10 @@ pub use attempt::{AttemptRow, NewAttempt};
 pub use claim::{ClaimedRun, claim_next_run, claim_run};
 pub use error::{StoreError, StoreResult};
 pub use lease::{ExpiredLease, HEARTBEAT_MS, LEASE_MS};
+pub use ledger::{
+    DecisionRow, DecisionStatus, NewDecision, NewPlanVersion, NewProject, PlanVersionRow,
+    ProjectRow,
+};
 pub use migrate::{MigrationStep, migrate};
 pub use repair::{NewRepairObservation, RepairObservationRow};
 pub use run::{FindingRow, RunRow};
@@ -566,5 +571,130 @@ impl Store {
     /// Move a task, refusing anything §5.2's machine does not draw.
     pub fn set_task_state(&mut self, id: &TaskId, to: TaskState) -> StoreResult<TaskState> {
         task::set_task_state(&mut self.conn, id, to)
+    }
+
+    /// A task's materialized §4.4 `declared_actions`, as raw plan-model JSON.
+    /// `None` = never materialized; `Some("[]")` = materialized, declares
+    /// none. See [`schema::SCHEMA_V8`].
+    pub fn declared_actions(&self, id: &TaskId) -> StoreResult<Option<String>> {
+        task::declared_actions(&self.conn, id)
+    }
+
+    /// Record a task's materialized `declared_actions`. `None` clears it back
+    /// to "never materialized".
+    pub fn set_declared_actions(&mut self, id: &TaskId, json: Option<&str>) -> StoreResult<()> {
+        task::set_declared_actions(&mut self.conn, id, json)
+    }
+
+    /// A task's materialized `depends_on`, as raw plan-model JSON. Same
+    /// `None`/`Some("[]")` distinction as [`Store::declared_actions`].
+    pub fn depends_on(&self, id: &TaskId) -> StoreResult<Option<String>> {
+        task::depends_on(&self.conn, id)
+    }
+
+    /// Record a task's materialized `depends_on`. `None` clears it back to
+    /// "never materialized".
+    pub fn set_depends_on(&mut self, id: &TaskId, json: Option<&str>) -> StoreResult<()> {
+        task::set_depends_on(&mut self.conn, id, json)
+    }
+
+    /// A task's materialized `acceptance_criteria`, as raw plan-model JSON.
+    /// Same `None`/`Some("[]")` distinction as [`Store::declared_actions`].
+    pub fn acceptance_criteria(&self, id: &TaskId) -> StoreResult<Option<String>> {
+        task::acceptance_criteria(&self.conn, id)
+    }
+
+    /// Record a task's materialized `acceptance_criteria`. `None` clears it
+    /// back to "never materialized".
+    pub fn set_acceptance_criteria(&mut self, id: &TaskId, json: Option<&str>) -> StoreResult<()> {
+        task::set_acceptance_criteria(&mut self.conn, id, json)
+    }
+
+    // -- plan ledger: project, plan_version, decision (S11 T2) -------------
+
+    /// Insert a project, or refresh the facts about one already known.
+    pub fn upsert_project(&mut self, new: &NewProject, now_ms: i64) -> StoreResult<ProjectRow> {
+        ledger::upsert_project(&mut self.conn, new, now_ms)
+    }
+
+    /// A project by its root path.
+    pub fn project_by_root(&self, root_path: &str) -> StoreResult<Option<ProjectRow>> {
+        ledger::project_by_root(&self.conn, root_path)
+    }
+
+    /// One project by id.
+    pub fn project(&self, id: &ProjectId) -> StoreResult<Option<ProjectRow>> {
+        ledger::project(&self.conn, id)
+    }
+
+    /// Create a plan version in `DRAFT`. Errors on a duplicate id — a plan
+    /// version is immutable once written, not resynced.
+    pub fn create_plan_version(&mut self, new: &NewPlanVersion) -> StoreResult<PlanVersionRow> {
+        ledger::create_plan_version(&mut self.conn, new)
+    }
+
+    /// One plan version by id.
+    pub fn plan_version(&self, id: &PlanVersionId) -> StoreResult<Option<PlanVersionRow>> {
+        ledger::plan_version(&self.conn, id)
+    }
+
+    /// Every version of a project's plan, oldest first.
+    pub fn plan_versions_for_project(
+        &self,
+        project_id: &ProjectId,
+    ) -> StoreResult<Vec<PlanVersionRow>> {
+        ledger::plan_versions_for_project(&self.conn, project_id)
+    }
+
+    /// Move a plan version, refusing anything §5.2's machine does not draw.
+    pub fn set_plan_state(
+        &mut self,
+        id: &PlanVersionId,
+        to: PlanVersionState,
+    ) -> StoreResult<PlanVersionState> {
+        ledger::set_plan_state(&mut self.conn, id, to)
+    }
+
+    /// `→ SUPERSEDED` — the edge every non-terminal plan state has.
+    pub fn supersede_plan_version(&mut self, id: &PlanVersionId) -> StoreResult<PlanVersionState> {
+        ledger::supersede_plan_version(&mut self.conn, id)
+    }
+
+    /// Record approval content on a plan version that is already `APPROVED`
+    /// — Ruling 5's door that is not the transition table. See
+    /// [`ledger::record_plan_approval_content`].
+    pub fn record_plan_approval_content(
+        &mut self,
+        id: &PlanVersionId,
+        content_hash: &str,
+        approved_by: &str,
+        now_ms: i64,
+    ) -> StoreResult<()> {
+        ledger::record_plan_approval_content(&mut self.conn, id, content_hash, approved_by, now_ms)
+    }
+
+    /// Insert a decision in `OPEN`, or refresh the content facts a re-synced
+    /// decision file can change. Never touches `status`.
+    pub fn upsert_decision(&mut self, new: &NewDecision) -> StoreResult<DecisionRow> {
+        ledger::upsert_decision(&mut self.conn, new)
+    }
+
+    /// One decision by id.
+    pub fn decision(&self, id: &str) -> StoreResult<Option<DecisionRow>> {
+        ledger::decision(&self.conn, id)
+    }
+
+    /// Every decision recorded for a project, ordered by id.
+    pub fn decisions_for_project(&self, project_id: &ProjectId) -> StoreResult<Vec<DecisionRow>> {
+        ledger::decisions_for_project(&self.conn, project_id)
+    }
+
+    /// Move a decision, refusing anything the decision machine does not draw.
+    pub fn set_decision_status(
+        &mut self,
+        id: &str,
+        to: DecisionStatus,
+    ) -> StoreResult<DecisionStatus> {
+        ledger::set_decision_status(&mut self.conn, id, to)
     }
 }

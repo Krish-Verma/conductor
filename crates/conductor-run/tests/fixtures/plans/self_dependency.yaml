@@ -1,0 +1,38 @@
+# `valid.yaml` with one defect: T-0002 depends on itself.
+#
+# The degenerate cycle. It is a separate fixture because a cycle detector
+# written with a "skip the node you started from" shortcut finds the two-task
+# cycle in `dependency_cycle.yaml` and misses this one entirely.
+plan:
+  id: p-fixture
+  version: 3
+  objective: "A task waits for itself."
+  milestones:
+    - id: M-01
+      title: "Plan core"
+      slices:
+        - id: S-11
+          title: "Plan ledger"
+          tasks:
+            - id: T-0001
+              objective: "Model the plan document."
+              depends_on: []
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "The model deserialises the fixture plans."
+                  verified_by: [unit-tests]
+            - id: T-0002
+              objective: "Validate the plan document."
+              depends_on: [T-0002]
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "Every refusal names the offending id."
+                  verified_by: [unit-tests]

@@ -444,6 +444,86 @@ pub fn parse_rfc3339_utc(text: &str) -> Option<i64> {
     Some(((days * 86_400 + hour * 3_600 + minute * 60 + second) * 1_000) + millis)
 }
 
+/// Render milliseconds since the epoch as `YYYY-MM-DDTHH:MM:SS[.fff]Z` — the
+/// exact inverse of [`parse_rfc3339_utc`].
+///
+/// # Why this exists, and why it lives next to the parser
+///
+/// §4.3 writes approval artifacts with `requested_at: 2026-08-12T14:03:00Z`,
+/// and S11's `APPROVED` sidecar is the same category of artifact: a **committed
+/// file**. §3.2 keeps plans in git so they are *"reviewable as a diff, in a PR,
+/// by a human"* and *"readable without Conductor installed"*, and `1786…`
+/// satisfies the letter of "readable" while defeating its purpose.
+///
+/// It sits beside [`parse_rfc3339_utc`] rather than in
+/// [`crate::plan::ledger`] because civil-date conversion in two modules is two
+/// implementations that can disagree about a leap year. One module owns the
+/// calendar; both directions share [`days_in_month`]'s and
+/// [`days_from_civil`]'s notion of it, and the round-trip test below is
+/// therefore a test of one calendar rather than a test of two agreeing by
+/// luck.
+///
+/// Hand-written for the reason [`parse_rfc3339_utc`] gives: §2.2's list has no
+/// date crate, and this is one civil-date conversion whose every branch is
+/// covered below.
+///
+/// Milliseconds are emitted only when non-zero, which is the spelling §4.3's
+/// own examples use. Both spellings parse back to the same instant, which is
+/// why `plan::ledger::verify_approval` compares *instants* and never the text.
+///
+/// # Range
+///
+/// RFC 3339's `date-fullyear` is exactly four digits, so instants outside
+/// years 0000–9999 have no conformant spelling. This renders them with the
+/// year as-is rather than failing: a value that far out is a corrupt clock, and
+/// producing something a human can read and recognise as wrong beats producing
+/// nothing. `parse_rfc3339_utc` still round-trips whatever is produced.
+pub fn format_rfc3339_utc(millis: i64) -> String {
+    // Euclidean, not truncating: an instant before 1970 has a negative
+    // millisecond count, and `-1 / 86_400_000 == 0` would put it on the wrong
+    // day while `-1 % 86_400_000 == -1` would give it a negative clock.
+    let days = millis.div_euclid(86_400_000);
+    let within_day = millis.rem_euclid(86_400_000);
+    let (year, month, day) = civil_from_days(days);
+    let fraction = within_day % 1_000;
+    let seconds_of_day = within_day / 1_000;
+    let (hour, minute, second) = (
+        seconds_of_day / 3_600,
+        (seconds_of_day / 60) % 60,
+        seconds_of_day % 60,
+    );
+    if fraction == 0 {
+        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+    } else {
+        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{fraction:03}Z")
+    }
+}
+
+/// The proleptic Gregorian date a day number names (Howard Hinnant's
+/// `civil_from_days`) — the inverse of [`days_from_civil`], and taken from the
+/// same source so the two cannot disagree about a century leap year.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let shifted = days + 719_468;
+    let era = if shifted >= 0 {
+        shifted
+    } else {
+        shifted - 146_096
+    } / 146_097;
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    };
+    (if month <= 2 { year + 1 } else { year }, month, day)
+}
+
 /// Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant's
 /// `days_from_civil`).
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
@@ -774,6 +854,84 @@ mod tests {
         }
         // 1900 is not a leap year; 2100 will not be either.
         assert!(parse_rfc3339_utc("1900-02-29T00:00:00Z").is_none());
+    }
+
+    /// Every instant that matters, spelled by hand, checked in **both**
+    /// directions.
+    ///
+    /// `format(parse(literal)) == literal` is the assertion that carries the
+    /// weight. A bare `parse(format(t)) == t` round trip would pass for a
+    /// formatter and a parser that are wrong in the same way — two functions
+    /// sharing one off-by-one agree with each other perfectly — so each case
+    /// is anchored to a literal a human wrote and can check.
+    #[test]
+    fn every_instant_round_trips_between_the_formatter_and_the_parser() {
+        for literal in [
+            // Epoch zero.
+            "1970-01-01T00:00:00Z",
+            // Before the epoch: the case that needs Euclidean division, since
+            // truncating division would put it on the following day with a
+            // negative clock.
+            "1969-07-20T20:17:40Z",
+            // A leap day.
+            "2024-02-29T12:34:56.789Z",
+            // The century rule, in the direction that is easy to get wrong:
+            // 2000 *is* a leap year, 1900 is not.
+            "2000-02-29T00:00:00Z",
+            "1900-03-01T00:00:00Z",
+            // An end-of-year boundary, with milliseconds.
+            "2023-12-31T23:59:59.999Z",
+            // The current era, and §4.3's own reference value.
+            "2026-08-13T14:03:00Z",
+            "2026-08-16T09:07:01.001Z",
+        ] {
+            let instant =
+                parse_rfc3339_utc(literal).unwrap_or_else(|| panic!("{literal} must parse"));
+            assert_eq!(
+                format_rfc3339_utc(instant),
+                literal,
+                "the formatter must produce the spelling a human wrote"
+            );
+            assert_eq!(
+                parse_rfc3339_utc(&format_rfc3339_utc(instant)),
+                Some(instant),
+                "and the parser must read its own output back"
+            );
+        }
+    }
+
+    #[test]
+    fn a_whole_second_is_written_without_a_fraction_and_both_spellings_are_one_instant() {
+        // §4.3's examples write whole seconds bare. The two spellings must not
+        // be two instants, because `plan::ledger::verify_approval` compares a
+        // sidecar against a store column and a re-serialized file must not read
+        // as a disagreement.
+        assert_eq!(format_rfc3339_utc(3_000), "1970-01-01T00:00:03Z");
+        assert_eq!(
+            parse_rfc3339_utc("1970-01-01T00:00:03.000Z"),
+            parse_rfc3339_utc("1970-01-01T00:00:03Z")
+        );
+    }
+
+    #[test]
+    fn the_two_directions_of_the_calendar_agree_across_every_day_for_four_centuries() {
+        // `days_from_civil` and `civil_from_days` are two transcriptions of one
+        // algorithm, and a single transposed constant in either would show up
+        // only on some dates. The Gregorian calendar repeats every 146_097
+        // days, so walking one full cycle is exhaustive rather than sampled.
+        for day in -60_000..86_097 {
+            let (year, month, date) = civil_from_days(day);
+            assert_eq!(
+                days_from_civil(year, month, date),
+                day,
+                "{year:04}-{month:02}-{date:02} did not come back to day {day}"
+            );
+            assert!((1..=12).contains(&month), "month {month} on day {day}");
+            assert!(
+                date >= 1 && date <= days_in_month(year, month),
+                "{year:04}-{month:02}-{date:02} is not a real date"
+            );
+        }
     }
 
     #[test]

@@ -1,0 +1,47 @@
+# `valid.yaml` with one defect: T-0002 gains AC-3, "the plan core works
+# correctly", bound to nothing and not declared `manual`.
+#
+# §3.7: "That last one matters most: an unbound criterion is the mechanism by
+# which a task reaches `COMPLETE` on an agent's word." §4.5's completion
+# criterion 5 says "every acceptance criterion binds to ≥1 passing check" — a
+# criterion with no binding satisfies that vacuously, so the task completes and
+# nothing ever ran.
+#
+# This file and `manual_criterion.yaml` differ by one key. That is the whole
+# experiment: `manual: true` is the escape hatch, and it is the *only* thing
+# that turns this refusal into an acceptance.
+plan:
+  id: p-fixture
+  version: 3
+  objective: "A criterion nobody can check and nobody must read."
+  milestones:
+    - id: M-01
+      title: "Plan core"
+      slices:
+        - id: S-11
+          title: "Plan ledger"
+          tasks:
+            - id: T-0001
+              objective: "Model the plan document."
+              depends_on: []
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "The model deserialises the fixture plans."
+                  verified_by: [unit-tests]
+            - id: T-0002
+              objective: "Validate the plan document."
+              depends_on: [T-0001]
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "Every refusal names the offending id."
+                  verified_by: [unit-tests]
+                - id: AC-3
+                  statement: "The plan core works correctly."

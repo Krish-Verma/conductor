@@ -3,7 +3,7 @@
 **Version:** 1.0 (authoritative)
 **Date:** 2026-08-12
 **Supersedes:** `CONDUCTOR-ARCHITECTURE-REVIEW.md`, `CONDUCTOR-CONVERGENCE-PASS-01.md`
-**Status:** design complete; no implementation has begun.
+**Status:** design complete. **S0–S11 implemented** (see Part 8 for per-slice state and `docs/reports/` for the evidence). This line was stale from S1 through S11 — it still read *"no implementation has begun"* after eleven slices had shipped — and is called out here because a status line nobody updates is how a document starts being read as history rather than as specification.
 
 This document is self-contained. Someone with only this file should be able to build Conductor.
 
@@ -544,6 +544,10 @@ before launching an attempt:
 
 ~50 lines and one table. It does not rank adapters and does not choose between eligible options. Any growth beyond "compare a vector, refuse or proceed" is scope creep.
 
+**The refusal is a persisted state, not a log line — wired at S9, recorded here at S11.** The run and its task go to `BLOCKED` with a `CRITICAL` finding naming the dimension, the requirement and the measured value. The call site "before launching an attempt" is `enforce/launch.rs`, and the edge is §5.2's correction 5 (`READY → BLOCKED`). *(ADR-0012 listed §4.2 as an impacted section; the substance landed in §5.2, Part 9 row 30 and Part 8's S9, but this block — where a reader starts — was never updated. Found and applied by S11's amendment audit.)*
+
+**Which adapter this compares is `.conductor/project.yaml`'s `adapter:` (§3.1), unless `conductor task run --adapter` overrides it for one run.** There is no default: neither source is a refusal. *(Stated at S11, because `Project::adapter` had been parsed, validated and hashed since S11's own T3 while `--adapter` defaulted to `fake`, so the declared adapter decided nothing.)*
+
 ## 4.3 Approval architecture
 
 **A `0600` unix socket does not distinguish a human from a same-user subprocess, and removing an environment variable is obscurity.** Approval integrity is a property of the execution mode.
@@ -742,6 +746,13 @@ verification:
     - id: git-invariants
       command: conductor scan git-invariants
 ```
+
+**Two spellings the block above cannot express, both settled at S4 — applied at S11.**
+
+1. **`conditional:` entries written as `commands: [x]` carry no `id`**, yet `check_id` is a component of the result-cache key below. Both spellings are accepted: `checks:` carries full definitions (`id`, `command`, `timeout_seconds`, `on_timeout`), and the `commands:` shorthand derives the id from the command itself — which for this section's own example yields exactly `migration-validate`. An entry with neither is refused.
+2. **`command:` as a bare string cannot express an argument containing a space.** An argv-list form (`command: ["cargo", "check", "--all-targets"]`) is also accepted; both normalise to the same `Vec<String>` before hashing, so the two spellings of one command produce **one** cache key. A quoted argument inside the string form is **refused** rather than half-parsed.
+
+*(S4's report recorded both as spec defects it had fixed; the master plan had not received either. Found and applied by S11's amendment audit. Implemented at `crates/conductor-run/src/verify/profile.rs`; `an_argv_list_and_the_equivalent_string_hash_identically` is the test for the second.)*
 
 **Results are bound to a tree, not to a run:**
 
@@ -997,6 +1008,7 @@ On restart, an `INTENDED` row is resolved by **re-checking the precondition agai
 | `OUT_OF_SCOPE` | changes outside declared scope | finding → AWAITING_REVIEW |
 | `POLICY_SENSITIVE` | deps/lockfile/migrations/git-config touched | policy evaluation → approval or review |
 | `CONTRADICTED` | report contradicts observed state | finding; **git wins** → AWAITING_REVIEW |
+| `GOVERNANCE_VIOLATION` | a changed path is under `.conductor/` (§3.3 control 1) | finding (`CRITICAL`) → AWAITING_REVIEW; **never fetched** |
 | `CORRUPT` | repo broken (merge in progress, detached, index lock) | → BLOCKED |
 
 **Reconciled surface** (after every attempt, before any state advances): `git status --porcelain=v2 --branch` · staged and unstaged diffs · untracked files · new commits and parents · **`git config --list --local` diffed** · **`git remote -v` diffed** · **all refs diffed** · reflog · stash list · dependency manifests · lockfiles · migration globs · files outside scope · secret-pattern scan over the whole diff · hooks directory · submodule state · **`/tmp` delta during the attempt window**.
@@ -1006,9 +1018,21 @@ Any unexplained delta raises a `Finding`. **Findings never auto-resolve.**
 **Verdict precedence** (unspecified originally; fixed at S2 because row 14 forces it). Exactly one verdict is returned, highest wins:
 
 ```
-CORRUPT  >  CONTRADICTED  >  POLICY_SENSITIVE  >  OUT_OF_SCOPE
-         >  CLEAN_COMPLETE / CLEAN_NO_REPORT   >  NO_CHANGE
+CORRUPT  >  GOVERNANCE_VIOLATION  >  CONTRADICTED  >  POLICY_SENSITIVE
+         >  OUT_OF_SCOPE  >  CLEAN_COMPLETE / CLEAN_NO_REPORT  >  NO_CHANGE
 ```
+
+> **An eighth verdict, added at S11 (ADR-0014).** This table originally had
+> seven, and row 29 was to be served by `OUT_OF_SCOPE` — §3.3 does call
+> `.conductor/**` an "always-forbidden write scope". That cannot express §3.3's
+> **"unconditionally"**: `POLICY_SENSITIVE` outranks `OUT_OF_SCOPE` (correctly,
+> because row 14 forces it), so an agent editing `.conductor/policy.yaml` *and*
+> touching a lockfile classifies as a policy question, routes to approval, and a
+> human granting the dependency advances a run still carrying the governance
+> edit. The approval was never about that edit and nothing afterwards asks.
+> `GOVERNANCE_VIOLATION` sits directly below `CORRUPT` because a broken
+> repository makes every other reading unreliable, and nothing else outranks
+> discovering the rules themselves were edited.
 
 `POLICY_SENSITIVE` must outrank `NO_CHANGE`: Part 9 row 14 sets a remote inside the clone, which leaves the *tree* identical to baseline while changing something that matters. A tree-first classifier would report `NO_CHANGE` and advance. `CORRUPT` outranks everything because a broken repository makes every other reading unreliable.
 
@@ -1021,7 +1045,7 @@ CORRUPT  >  CONTRADICTED  >  POLICY_SENSITIVE  >  OUT_OF_SCOPE
 | 1. Prompt instructions | **nothing** — this is documentation, not a control | yes, worth ~0 |
 | 2. Deterministic policy | Conductor's own actions | yes |
 | 3. Conductor-owned effects | agent performing push/deploy/migrate *through Conductor* | yes |
-| 4. Agent permission hooks | specific tool calls by pattern; **known bypasses** | Claude only (M17) |
+| 4. Agent permission hooks | specific tool calls by pattern; **known bypasses**, two confirmed end-to-end (M19, §6.3) | Claude only (M17) |
 | 5. OS sandbox | writes outside workspace; network; AF_UNIX | **Codex only** (M6–M11) |
 | 6. **Credential absence** | **push, deploy, cloud API, DB access** | **yes, and cheapest** |
 | 7. Network control | egress | Codex only (M9) |
@@ -1030,6 +1054,7 @@ CORRUPT  >  CONTRADICTED  >  POLICY_SENSITIVE  >  OUT_OF_SCOPE
 **Layer 6 is the primary control**, not the fourth. *An agent with no push credential cannot push, regardless of what it types, what it is told, or whether any hook fires.* Concretely, the agent subprocess is spawned with:
 
 - An **allowlisted** environment (`PATH`, redirected `HOME`, `LANG`, `TERM`, the adapter's own auth variable, nothing else). Not a denylist — a denylist misses the next variable name.
+- The adapter's auth variable may name a **directory** rather than carry a secret, and for the first real adapter it does. *(Measured at S10: `~/.codex/auth.json` has `auth_mode: "chatgpt"` and a null `OPENAI_API_KEY`, so what Codex reads is `CODEX_HOME`.)* The launch path therefore materialises a **per-run credential home inside the workspace** — mode `0700`, holding **only** the files the adapter names, each `0600`, git-excluded so a credential cannot become a commit, dying with the workspace and inside §4.8's audit surface. A named file the operator does not have is a **refusal**, not an empty home that fails later as an opaque `401`. The operator's real `~/.codex` is never handed to an agent, for two reasons and the second is the serious one: it holds `config.toml`, every profile and the whole session history, none of which is a credential; and **Codex writes into `CODEX_HOME`**, so a contained run pointed at it would leave session rollouts outside the workspace, outside §4.8's reconciled surface and outside the per-run `TMPDIR` audit. *(Mechanism built at S10; wired to `conductor task run` at S11 — before which it existed only in tests, which is not a product boundary.)*
 - `GIT_TERMINAL_PROMPT=0`; `GIT_ASKPASS` → **a program Conductor writes itself**, into the per-run `HOME` at mode `0500`, which exits non-zero and prints nothing. *(Corrected at S9, ADR-0011: S5 pointed this at `/bin/false`, which **does not exist on macOS**. It failed safe only because `GIT_TERMINAL_PROMPT=0` caught the fallback — a named mechanism that was not present. Referencing a host path is what made that possible.)*
 - **`GIT_CONFIG_NOSYSTEM=1`**, with `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` pinned to `/dev/null`. *(Added at S9, ADR-0011.* A **system** gitconfig is located by absolute path, so it survives both `env_clear` and a redirected `HOME`. On a macOS host with Xcode's git it declares `credential.helper=osxkeychain` — a credential source reachable by an agent that adds its own remote, defeating layer 6 without touching a single environment variable. No item in the list above closes it.*)*
 - `SSH_AUTH_SOCK` unset; no `~/.netrc`; no `GH_TOKEN`/`GITHUB_TOKEN`; no cloud or database variables.
@@ -1051,6 +1076,22 @@ CORRUPT  >  CONTRADICTED  >  POLICY_SENSITIVE  >  OUT_OF_SCOPE
 # Part 5 — Data and State
 
 ## 5.1 Schema (v1)
+
+**This section is the v1 schema and is deliberately not migrated in place.** The
+shipped store is at **v8**; the migrations that took it there are
+`crates/conductor-store/src/migrate.rs`, which is the authority on what columns
+exist today. The deltas are recorded where the slice that made them is recorded:
+v2 (`attempt.state`) in §5.2, v3 (`artifact.content_hash`) inline below, v4
+(`run.target_branch`) in Part 8's S5, v5 (`repair_observation`) in S6, v6
+(`approval_kinds`) in S8, v7 (`task.execution_requirements`) and v8 (the `task`
+plan-content columns) in S11.
+
+Stated once, here, because ADR-0009 names *"Part 5.1 (schema v5)"* as an impacted
+section on the opposite assumption — that this block tracks the live schema. It
+does not, and trying to make it would give the repository two schema
+definitions that can disagree, when one of them is executable and the other is
+prose. **The DDL below is the starting point, not the current state.**
+*(Recorded at S11's amendment audit.)*
 
 ```sql
 PRAGMA journal_mode = WAL;
@@ -1251,7 +1292,7 @@ DRAFT ──validate──► VALIDATED ──request──► AWAITING_APPROVAL
 
 Dropped from the baseline: `IMPORTED` (indistinguishable from `DRAFT`) and terminal `REJECTED` (a rejected plan is a `DRAFT` again; a terminal reject state is a graveyard nobody queries).
 
-**Authority:** `APPROVED` only via a human at the control socket. **Evidence:** `content_hash` + validation report. **Invalid:** `DRAFT → APPROVED`; `APPROVED → *` except `SUPERSEDED`. **Restart:** re-hash on load; a mismatch on an `APPROVED` plan is a hard error, cleared by re-running `conductor plan approve <version>` on the changed document. *(Corrected at S11: §7.1's 13-command surface has no `plan reapprove`, so as written the hard-error state had no exit. `plan approve` is already human-only and socket-only, which is exactly the authority re-approval requires — a fourteenth command would add a second door to the same room.)*
+**Authority:** `APPROVED` only via a human at the control socket. *(Qualified at S11, ADR-0015: this governs how a plan **becomes** approved. It does not govern how a machine that lost `conductor.db` learns that a human already did so. A §4.3 grant is a row and dies with the store, so read unqualified this clause contradicts §3.5's "**Not lost:** every approved plan". `ledger::adopt_approval` restores `APPROVED` from the `APPROVED` sidecar — which `approve` writes **last**, after a real grant is consumed, making it a receipt for a socket decision rather than a second door onto authority. It walks this machine's edges (`VALIDATED → AWAITING_APPROVAL → APPROVED`) and refuses on any disagreement between receipt, directory and a freshly recomputed document hash.)* **Evidence:** `content_hash` + validation report. **Invalid:** `DRAFT → APPROVED`; `APPROVED → *` except `SUPERSEDED`. **Restart:** re-hash on load; a mismatch on an `APPROVED` plan is a hard error, cleared by re-running `conductor plan approve <version>` on the changed document. *(Corrected at S11: §7.1's 13-command surface has no `plan reapprove`, so as written the hard-error state had no exit. `plan approve` is already human-only and socket-only, which is exactly the authority re-approval requires — a fourteenth command would add a second door to the same room.)*
 
 ### Task (12 states)
 
@@ -1371,7 +1412,7 @@ trait AgentAdapter {
     fn id(&self) -> &str;
     fn capabilities(&self) -> FunctionalCapabilities;
     fn command(&self, input: &StartInput) -> Result<AgentCommand>;   // does NOT spawn
-    fn parse_event(&self, line: &str) -> Result<Option<AgentEvent>>;
+    fn parse_event(&self, line: &str) -> Result<Vec<AgentEvent>>;
     fn extract_report(&self, out: &RunOutputs) -> Result<Option<AgentReport>>;
     fn classify_exit(&self, code: Option<i32>, sig: Option<i32>) -> AttemptOutcome;
     fn resume_command(&self, input: &ResumeInput) -> Option<AgentCommand>;
@@ -1386,6 +1427,8 @@ struct FunctionalCapabilities {          // security capabilities live in
     spend_cap:                     bool,
 }
 ```
+
+**`parse_event` returns `Vec<AgentEvent>`, amended at S10 — applied at S11.** It originally returned `Option<AgentEvent>`: one line, at most one event. Codex's `file_change` item carries an **array** of paths, so the adapter reported the first and silently dropped the rest, and every multi-file edit understated what the agent did. Nothing failed, because §4.8 reconciles against git, which sees all of them — which is precisely why no test could have caught it. S10's own rule ("if a scenario needs adapter-specific handling, that is a design smell to fix in the interface, not the adapter") makes this an interface change: applied across all three implementors and both supervisor call sites. *(S10's report claimed this amendment; the master plan had not received it. Found and applied by S11's amendment audit.)*
 
 **Dropped from the baseline interface:** `streamEvents`, `inspect`, `interrupt`, `terminate`, `resume` as session-object methods. Both real adapters are process launchers writing JSONL to stdout; the interface should say that.
 
@@ -1955,7 +1998,7 @@ trivially. A positive control was added at review and proven to fail under that 
 
 ---
 
-### S9 — Enforcement and post-run audit  ⛔ **HARD GATE before S10**
+### S9 — Enforcement and post-run audit  ✅ **COMPLETE 2026-08-15** *(was: ⛔ HARD GATE before S10)*
 
 **Objective.** Make the environment, not the prompt, the boundary.
 **Why now.** No real agent runs before this exists.
@@ -1978,7 +2021,7 @@ those decisions **reachable**, and a call site is where that lives.)*
 
 ---
 
-### S10 — First real adapter: Codex
+### S10 — First real adapter: Codex  ✅ **COMPLETE 2026-08-16**
 
 **Objective.** Replace the fake agent with `codex exec` behind the same interface.
 **Dependencies.** S3, S2.5, S9.
@@ -1993,7 +2036,7 @@ those decisions **reachable**, and a call site is where that lives.)*
 
 ---
 
-### S11 — Plan ledger and decisions
+### S11 — Plan ledger and decisions  ✅ **COMPLETE 2026-08-16**
 
 **Objective.** Repo-tracked, versioned, immutable plans; append-only decisions.
 **Dependencies.** S5.
@@ -2002,6 +2045,35 @@ those decisions **reachable**, and a call site is where that lives.)*
 **Tests.** Approved plan immutable (edit → hard error) · revision creates a version and supersedes tasks · in-flight runs keep their old plan version · **a change to `.conductor/**` arriving on a run branch is rejected with a finding** · reformatting does not invalidate approval; a field change does.
 **Verify.** **Delete `conductor.db`, rebuild: no plan, decision, policy or verification definition is lost.**
 **Stop point.** Project truth outlives execution state.
+
+*(**Outcome.** Three things the slice's own scope line did not say.*
+
+*1. **The verify line needed a mechanism, not just a test.** Every step of §3.5's
+recovery path had a function — `register_project`, `register_plan_version`,
+`register_decisions`, `materialize` — but not the order, and one step existed
+nowhere: restoring approval. A §4.3 grant lives only in the store, so once the
+store is gone no witness exists and `approve` cannot be replayed. Read literally,
+§5.2's "APPROVED only via a human at the control socket" and §3.5's "Not lost:
+every approved plan" then contradict each other. They are reconciled by what the
+`APPROVED` sidecar **is**: `approve` writes it last, after a real grant has been
+consumed, so the file is a **receipt for a decision that already happened at the
+socket** — §3.4's argument for commit trailers, applied to approval.
+`ledger::adopt_approval` re-reads a receipt and does not mint authority, which is
+why it takes no witness and spends no grant. What keeps it from being a second
+door is §3.3's control 1 plus checking every field of the receipt against
+something the receipt does not control — the version against its directory, the
+content hash against a **fresh** hash of the document, the timestamp against RFC
+3339. See `crates/conductor-run/src/plan/reconstruct.rs`.*
+
+*2. **`conductor recover` is §7.1's thirteenth command**, and is the process
+boundary for the above. `--scan` is **absent** rather than accepted-and-ignored:
+the descriptor scan §3.5 also names is a judgement about live execution state,
+and **S14 owns it**.*
+
+*3. **`Project::adapter` was a knob that did nothing.** Parsed, refused when
+blank, folded into `config_hash` — and never read, while `conductor task run
+--adapter` defaulted to `fake`. Fixed here rather than deferred; see §4.2's
+adapter clause.)*
 
 ---
 

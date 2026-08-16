@@ -43,22 +43,63 @@
 //! misses the cache, a miss yields `fail_closed()`, and every requirement above
 //! `None` then refuses.
 //!
-//! # What this does not yet enforce
+//! # §4.3's binding rule, and the declaration that made it wirable (S11)
 //!
-//! §4.3's **binding rule** — "a task whose policy can produce an approval gate
-//! may not run unattended below tier A" — is decided by
-//! [`crate::approval::gate::unattended_requirements`] and is still not wired.
-//! It needs the set of actions a task may perform, and no such declaration
-//! exists on a task at S9; inventing one here would be guessing at the schema
-//! S11 owns. The function, its tests and this note are the honest state: the
-//! rule is decided and not reachable. **S11 owns wiring it**, and until then the
-//! binding rule must not be scored as enforced.
+//! > **Binding rule:** a task whose policy can produce an approval gate **may
+//! > not run unattended** below tier A. Enforced by §4.2's eligibility check,
+//! > not by documentation.
+//!
+//! [`crate::approval::gate::unattended_requirements`] decided that at S9 and
+//! nothing called it, because the rule needs the set of actions a task may
+//! perform and no task could declare one. S11's plan document can
+//! ([`crate::plan::model::Task::actions`]), and materialization writes it to
+//! `task.declared_actions`, so [`gate`] now derives the rule's vector and
+//! [`crate::approval::gate::merge`]s it with the task's own before comparing.
+//! The merge takes the **stronger** demand per dimension, so a task cannot talk
+//! `control_surface: hard` down to `audit_only` by declaring a weaker
+//! requirement of its own.
+//!
+//! ## The rule has two operands, and the policy is not the caller's to supply
+//!
+//! *"a task whose **policy** can produce an approval gate"* — answering that
+//! needs the declaration **and** a policy. [`gate`] resolves the policy itself,
+//! `active_run_for_task` → [`crate::policy::pinned_for_run`], the same path
+//! [`super::policy_gate`] takes for the same reason (§4.4, acceptance row 23: a
+//! run is judged by the snapshot it is pinned to for its entire life).
+//!
+//! It is deliberately **not** a parameter. A policy a caller passes is a policy
+//! a caller can pass *wrongly*, and the wrong answer it produces — a §4.3
+//! verdict about a different set of rules than the run is judged by — looks
+//! exactly like the right one. There is no parameter to get wrong, so there is
+//! nothing to keep in sync.
+//!
+//! ## `NULL` and `'[]'` are two different facts
+//!
+//! Schema v8 keeps `task.declared_actions` nullable on purpose, and this is the
+//! call site where the distinction decides something:
+//!
+//! * **`NULL`** — no plan document has ever been read for this task. Every row
+//!   written before schema v8, and everything `create_task` still writes. The
+//!   rule does not apply and the gate keeps its S9 behaviour. Gating these would
+//!   retroactively change the meaning of every existing task row, and would
+//!   enforce §4.3 against tasks whose declaration nobody was ever asked for.
+//! * **`'[]'`** — a plan document was read and declared zero actions. The rule
+//!   *applies* and answers "no gate is possible", which is why reaching the
+//!   policy still has to succeed: a rule that cannot read its second operand is
+//!   undecided, and undecided is a refusal, never an empty policy. An empty
+//!   policy allows everything.
+//! * **Anything that does not decode** — a refusal, on
+//!   [`GateError::UnreadableRequirements`]'s reasoning applied to the sibling
+//!   column: the one task whose declaration went wrong must not be the one task
+//!   the rule stops applying to.
 
 use conductor_core::RunId;
 use conductor_store::Store;
 
+use crate::approval::gate::{merge, unattended_requirements};
 use crate::containment::cache::{ProbeKey, lookup};
 use crate::policy::eligibility::{Eligibility, ExecutionRequirements, OFFERS, check};
+use crate::policy::model::{Action, ResolvedPolicy};
 
 /// Why a launch was refused, in the words row 30 asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +138,47 @@ pub enum GateError {
         /// The parser's complaint.
         detail: String,
     },
+    /// The actions the task declares cannot be read.
+    ///
+    /// §4.3's binding rule asks what a task may do; a `declared_actions` column
+    /// that does not decode into a list of §4.4 names leaves that unknown.
+    /// Reading it as "no actions" would disable the rule for precisely the task
+    /// whose declaration went wrong — [`GateError::UnreadableRequirements`]'s
+    /// argument, applied to the other column §4.2's gate now reads.
+    #[error(
+        "task {task}'s declared_actions cannot be read, so §4.3's binding rule \
+         cannot be decided and the launch is refused rather than run ungated: \
+         {detail}"
+    )]
+    UnreadableActions {
+        /// The task.
+        task: String,
+        /// The decoder's complaint.
+        detail: String,
+    },
+    /// The policy §4.3's rule asks about cannot be reached.
+    ///
+    /// The rule is *"a task whose **policy** can produce an approval gate"*, and
+    /// the policy is the one the run is pinned to — never one on disk, and never
+    /// one a caller supplies. When it cannot be resolved the rule has no second
+    /// operand, and an undecided rule is a refusal.
+    ///
+    /// Specifically **not** an empty policy: an empty policy can gate nothing,
+    /// so treating a snapshot Conductor cannot decode as one would convert "we
+    /// cannot tell what the rules are" into "there are no rules" on the exact
+    /// path that exists to enforce them. [`super::policy_gate`] refuses the same
+    /// substitution for the same reason.
+    #[error(
+        "task {task} was materialized from a plan, but the policy its run is \
+         pinned to cannot be read, so §4.3's binding rule cannot be decided and \
+         the launch is refused rather than run ungated: {detail}"
+    )]
+    UnreadablePolicy {
+        /// The task.
+        task: String,
+        /// Why the policy could not be reached.
+        detail: String,
+    },
 }
 
 /// Decide whether this task may launch on this host.
@@ -104,12 +186,20 @@ pub enum GateError {
 /// `Ok(None)` means proceed. `Ok(Some(refusal))` means row 30: refuse, name the
 /// dimension. `Err` means the gate could not decide, which is also a refusal —
 /// callers must not treat it as permission.
+///
+/// Two sources feed the comparison and neither can weaken the other: the task's
+/// own §4.2 vector, and §4.3's binding rule derived from what the task declares
+/// it may do under the policy its run is pinned to. They are combined by
+/// [`merge`], which takes the stronger demand per dimension.
 pub fn gate(
     store: &Store,
     task_id: &conductor_core::TaskId,
     probe_key: &ProbeKey,
 ) -> Result<Option<Refusal>, GateError> {
-    let requirements = requirements_for(store, task_id)?;
+    let requirements = merge(
+        &requirements_for(store, task_id)?,
+        &binding_rule_for(store, task_id)?,
+    );
 
     // §4.2: "It does not rank adapters and does not choose between eligible
     // options." An empty vector compares nothing and proceeds — which is what
@@ -193,6 +283,85 @@ fn requirements_for(
         });
     }
     Ok(parsed)
+}
+
+/// §4.3's binding rule for this task, as an §4.2 requirement vector.
+///
+/// `control_surface: hard` when the policy the run is pinned to can produce an
+/// approval gate for anything the task declares; an empty vector otherwise,
+/// which compares nothing and proceeds.
+///
+/// The decision itself is not made here — it is
+/// [`crate::approval::gate::unattended_requirements`], written at S9 with a full
+/// account of what "can produce a gate" means (including ADR-0010's capped
+/// deny). This function's whole job is to establish its two inputs, and to
+/// refuse when it cannot. See the module docs for why `NULL` and `'[]'` take
+/// different paths through it.
+///
+/// # An out-of-taxonomy name is not a special case here
+///
+/// [`Action::parse`] is infallible: a name §4.4 has never heard of becomes
+/// [`Action::Unknown`], which evaluation floors at `deny`. A deny is not
+/// approvable, so an unknown action cannot produce an approval gate and
+/// contributes nothing to this vector — which is the safe direction and not a
+/// hole, because the action it names is refused outright rather than gated.
+fn binding_rule_for(
+    store: &Store,
+    task_id: &conductor_core::TaskId,
+) -> Result<ExecutionRequirements, GateError> {
+    // `NULL`: no plan document has ever been read for this task, so there is no
+    // declaration for the rule to apply to. Pre-S11 behaviour, deliberately
+    // preserved — see the module docs.
+    let Some(json) = store.declared_actions(task_id)? else {
+        return Ok(ExecutionRequirements::new());
+    };
+
+    let names: Vec<String> =
+        serde_json::from_str(&json).map_err(|error| GateError::UnreadableActions {
+            task: task_id.as_str().to_string(),
+            detail: format!(
+                "the column holds {} bytes but does not decode as the JSON array \
+                 of §4.4 action names the plan materializer writes: {error}",
+                json.trim().len()
+            ),
+        })?;
+    let actions: Vec<Action> = names.iter().map(|name| Action::parse(name)).collect();
+
+    Ok(unattended_requirements(
+        &pinned_policy(store, task_id)?,
+        &actions,
+    ))
+}
+
+/// The policy §4.3's rule asks about: the one the task's active run is pinned
+/// to.
+///
+/// Resolved from the store, never from `.conductor/policy.yaml` and never from a
+/// caller — the same discipline [`crate::policy::pinned_for_run`] exists to
+/// enforce, so an edit to the file mid-run cannot change the answer.
+///
+/// A task with no active run has no pinned policy, and there is no fallback to
+/// invent one. That is a refusal for the same reason an undecodable snapshot is:
+/// the rule needs a policy, and any policy Conductor substitutes here is a
+/// policy the run is not being judged by.
+fn pinned_policy(
+    store: &Store,
+    task_id: &conductor_core::TaskId,
+) -> Result<ResolvedPolicy, GateError> {
+    let Some(run_id) = store.active_run_for_task(task_id)? else {
+        return Err(GateError::UnreadablePolicy {
+            task: task_id.as_str().to_string(),
+            detail: "the task has no active run, so there is no pinned policy \
+                     snapshot to decide the rule against"
+                .to_string(),
+        });
+    };
+    crate::policy::pinned_for_run(store.conn(), &run_id)
+        .map(|pinned| pinned.policy)
+        .map_err(|error| GateError::UnreadablePolicy {
+            task: task_id.as_str().to_string(),
+            detail: format!("run {run_id}: {error}"),
+        })
 }
 
 /// The measurement key for this adapter on this host.

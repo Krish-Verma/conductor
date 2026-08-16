@@ -564,10 +564,7 @@ fn a_live_agent_found_at_startup_is_terminated_and_its_attempt_is_stale() {
             .expect("the pid was recorded before the kill")
     };
     assert!(
-        matches!(
-            conductor_run::supervise::probe(pid as i32, 0),
-            conductor_run::supervise::Liveness::Alive(_)
-        ),
+        conductor_run::supervise::start_time_us(pid as i32).is_some(),
         "the agent should have outlived its supervisor; there is nothing to recover otherwise"
     );
 
@@ -583,12 +580,7 @@ fn a_live_agent_found_at_startup_is_terminated_and_its_attempt_is_stale() {
     common::agent::wait_until(
         "the adopted agent to be gone",
         Duration::from_secs(10),
-        || {
-            matches!(
-                conductor_run::supervise::probe(pid as i32, 0),
-                conductor_run::supervise::Liveness::Dead
-            )
-        },
+        || conductor_run::supervise::start_time_us(pid as i32).is_none(),
     );
     assert_converged(&world, "live agent at startup");
 }

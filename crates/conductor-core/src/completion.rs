@@ -46,16 +46,23 @@
 //!
 //! # How a later slice is stopped from silently forgetting a criterion
 //!
-//! Two of the seven belong to slices that do not exist yet. They are **not**
-//! quietly skipped and they are **not** hardcoded to `true`. Each has an
-//! evidence type with exactly one variant — `NotEvaluated { owner }` — so today
-//! there is no way to *write down* "policy is satisfied".
+//! Two of the seven belonged to slices that did not exist when this gate was
+//! written. They were **not** quietly skipped and **not** hardcoded to `true`.
+//! Each had an evidence type with exactly one variant — `NotEvaluated { owner }`
+//! — so there was no way to *write down* "policy is satisfied".
 //!
-//! When S7 lands and adds `PolicyEvidence::AllGrantsPresent`, [`evaluate`]'s
-//! exhaustive `match` on that enum stops compiling. S7 therefore cannot ship
-//! without deciding, at this gate, what its evidence means. The same holds for
-//! S11 and acceptance bindings. Adding an eighth criterion breaks the match on
-//! [`Criterion::ALL`] for the same reason.
+//! The trap is that the moment an owning slice adds a satisfied variant,
+//! [`evaluate`]'s exhaustive `match` on that enum stops compiling: the slice
+//! cannot ship without deciding, at this gate, what its evidence means. **It
+//! has now fired twice** — S9 for [`PolicyEvidence`] and S11 for
+//! [`AcceptanceEvidence`] — and both arms above are the decision it forced.
+//! Adding an eighth criterion breaks the match on [`Criterion::ALL`] the same
+//! way.
+//!
+//! `NotEvaluated` survives both landings, and does not mean "the slice is
+//! missing" any more. It means the narrower thing that is still true of real
+//! rows: for acceptance, that no plan document has ever been materialized for
+//! this task, which is every `task` row created before S11.
 //!
 //! Belt and braces: [`VerifiedComplete::deferred`] carries the outstanding list
 //! at runtime, and a test pins it, so a change is a deliberate edit rather than
@@ -241,13 +248,134 @@ pub enum ReconciliationEvidence {
     NotReconciled,
 }
 
-/// Criterion 5 — **owned by S11.**
+/// One acceptance criterion, and what the checks it was bound to actually did.
 ///
-/// One variant on purpose. See the module docs: adding the satisfied variant is
-/// what makes [`evaluate`] stop compiling until S11 wires it in.
+/// # Evidence, not a verdict
+///
+/// The obvious alternative is a `satisfied: bool` filled in by whoever read the
+/// plan. That would move criterion 5's meaning out of this gate and into every
+/// caller, and the gate is the one place §4.5 is allowed to be interpreted.
+/// Carrying the observed results instead means the tree-binding rule — *"`PASS`
+/// **at the current tree hash**"* — is applied here, once, by the same code
+/// that applies it to criteria 1, 2 and 3.
+///
+/// # Why both `verified_by` and `results`
+///
+/// They are not two spellings of one list. `verified_by` is what the plan
+/// **declared**; `results` is what the run **observed**. A check the plan names
+/// that produced no result at all is exactly the difference between them, and
+/// it is a refusal — a conditional check whose trigger never matched proves
+/// nothing. A refusal that could not name it would tell a human "something is
+/// unbound" without saying what.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CriterionEvidence {
+    /// The criterion's id in the plan document — §3.6's stable ids.
+    pub id: String,
+    /// §3.7's escape hatch: *"mark it `manual: true`, which forces a review
+    /// boundary."*
+    pub manual: bool,
+    /// The check ids the plan bound it to, in declaration order.
+    pub verified_by: Vec<String>,
+    /// The results observed for those check ids. A named check that did not
+    /// run is simply absent here, which is why `verified_by` is also carried.
+    pub results: Vec<CheckEvidence>,
+}
+
+impl CriterionEvidence {
+    /// Why this criterion is not satisfied, or `None` when it is.
+    fn refuse(&self, tree_hash: &str) -> Option<String> {
+        if self.manual {
+            return Some(format!(
+                "criterion {:?} is manual, so nothing mechanical can satisfy it; \
+                 §3.7 calls that the escape hatch that \"forces a review boundary\"",
+                self.id
+            ));
+        }
+        // "≥1 passing check", literally: one is enough. A sibling that failed
+        // is refused by whichever of criteria 1–3 owns it, so reading this as
+        // "all of them" would make criterion 5 a duplicate of those rather than
+        // the separate question §4.5 asks.
+        if self
+            .results
+            .iter()
+            .any(|result| result.outcome.is_pass() && result.tree_hash == tree_hash)
+        {
+            return None;
+        }
+        if self.verified_by.is_empty() {
+            return Some(format!(
+                "criterion {:?} names no check at all; §3.7 refuses an unbound \
+                 criterion at validation because it is \"the mechanism by which a \
+                 task reaches COMPLETE on an agent's word\"",
+                self.id
+            ));
+        }
+        Some(format!(
+            "criterion {:?} binds to {:?} and none of them passed at tree \
+             {tree_hash}: {}",
+            self.id,
+            self.verified_by,
+            self.observed(tree_hash)
+        ))
+    }
+
+    /// What each named check produced, for the refusal message.
+    fn observed(&self, tree_hash: &str) -> String {
+        self.verified_by
+            .iter()
+            .map(
+                |check_id| match self.results.iter().find(|r| &r.check_id == check_id) {
+                    None => format!("{check_id} produced no result"),
+                    Some(result) if result.tree_hash != tree_hash => format!(
+                        "{check_id} is {} but on tree {}",
+                        result.outcome.as_str(),
+                        result.tree_hash
+                    ),
+                    Some(result) => format!("{check_id} is {}", result.outcome.as_str()),
+                },
+            )
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// Criterion 5 — **owned by S11, and answered since S11.**
+///
+/// Three variants, for the reason [`PolicyEvidence`] gives for criterion 7:
+/// *"the plan declares none"*, *"the plan declares these, and here is what each
+/// bound check did"*, and *"no plan document has ever been read for this task"*
+/// are three facts, and the first and third must never be conflated. Only the
+/// third is the absence of evidence, and only the third defers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum AcceptanceEvidence {
-    /// The plan ledger, which owns acceptance criteria, does not exist yet.
+    /// A plan was materialized for this task and declares no acceptance
+    /// criteria — `task.acceptance_criteria = '[]'`. Criterion 5 has nothing to
+    /// require, and says so rather than being skipped. Added at S11.
+    ///
+    /// **Vacuous, and safe here in a way criterion 1's empty set is not.**
+    /// Criterion 1 still refuses a run in which no required check passed at
+    /// this tree, so a criterion-less task cannot complete unverified; it
+    /// merely has nothing *extra* bound to it. §3.7 does not refuse a
+    /// criterion-less task at validation either, so refusing one here would
+    /// enforce at the gate a rule its author was never told about.
+    NoCriteria,
+    /// The criteria the plan declares, with the results of the checks each was
+    /// bound to. Added at S11.
+    ///
+    /// An **empty** vector is refused by [`evaluate`] rather than accepted:
+    /// "I evaluated the criteria" naming none asserts nothing, and leaving it
+    /// vacuously true would make the empty vector the easiest way to switch
+    /// criterion 5 off. [`AcceptanceEvidence::NoCriteria`] is how a plan that
+    /// declares none says so.
+    Evaluated {
+        /// One per criterion, in the plan's declaration order.
+        criteria: Vec<CriterionEvidence>,
+    },
+    /// No plan document has ever been materialized for this task —
+    /// `task.acceptance_criteria` is `NULL`, which is every row created before
+    /// S11. The honest statement about one is *"this was never checked"*, not
+    /// *"this was checked and found empty"*, and only this variant says the
+    /// first thing.
     NotEvaluated {
         /// The slice that owes this.
         owner: Slice,
@@ -416,8 +544,36 @@ pub fn evaluate(evidence: &CompletionEvidence) -> Result<VerifiedComplete, Vec<R
                 }),
             },
             Criterion::AcceptanceBindings => match &evidence.acceptance {
-                // When S11 adds a second variant this match stops being
-                // exhaustive and the build fails here. That is the point.
+                // S11's plan ledger materializes `task.acceptance_criteria`, so
+                // these two are now real answers rather than a deferral.
+                AcceptanceEvidence::NoCriteria => {}
+                AcceptanceEvidence::Evaluated { criteria } if criteria.is_empty() => {
+                    refusals.push(Refusal {
+                        criterion: *criterion,
+                        detail: "an acceptance evaluation that names no criterion \
+                                 has asserted nothing; a plan that declares none \
+                                 is NoCriteria, and a task no plan has been \
+                                 materialized for is NotEvaluated"
+                            .to_string(),
+                    });
+                }
+                AcceptanceEvidence::Evaluated { criteria } => {
+                    // One refusal for the criterion, not one per acceptance
+                    // criterion: `Refusal` is keyed by which of §4.5's seven
+                    // failed, and a human reading a stuck task wants every
+                    // unsatisfied criterion in that one entry rather than the
+                    // list's length depending on how many the plan declared.
+                    let details: Vec<String> = criteria
+                        .iter()
+                        .filter_map(|c| c.refuse(&evidence.tree_hash))
+                        .collect();
+                    if !details.is_empty() {
+                        refusals.push(Refusal {
+                            criterion: *criterion,
+                            detail: details.join("; "),
+                        });
+                    }
+                }
                 AcceptanceEvidence::NotEvaluated { .. } => deferred.push(*criterion),
             },
             Criterion::PolicyGrants => match &evidence.policy {

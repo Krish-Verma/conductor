@@ -13,10 +13,12 @@
 
 pub mod approval;
 pub mod containment;
+pub mod decision;
 pub mod effects;
 pub mod enforce;
 pub mod lease;
 pub mod paths;
+pub mod plan;
 pub mod policy;
 pub mod recovery;
 pub mod repair;

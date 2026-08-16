@@ -8,7 +8,7 @@
 
 use conductor_core::completion::{
     AcceptanceEvidence, CheckEvidence, ChecksEvidence, CompletionEvidence, Criterion,
-    FindingsEvidence, PolicyEvidence, ReconciliationEvidence, Slice, evaluate,
+    CriterionEvidence, FindingsEvidence, PolicyEvidence, ReconciliationEvidence, Slice, evaluate,
 };
 use conductor_core::{ReconciledRoute, RunState, VerificationOutcome};
 
@@ -190,6 +190,188 @@ fn a_run_with_no_checks_at_all_does_not_complete() {
         refusals
             .iter()
             .any(|r| r.criterion == Criterion::RequiredChecks)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// criterion 5 — every acceptance criterion binds to ≥1 *passing* check
+// ---------------------------------------------------------------------------
+
+/// One criterion, bound to the named checks, with the results the run observed.
+fn criterion(id: &str, verified_by: &[&str], results: Vec<CheckEvidence>) -> CriterionEvidence {
+    CriterionEvidence {
+        id: id.to_string(),
+        manual: false,
+        verified_by: verified_by.iter().map(|s| s.to_string()).collect(),
+        results,
+    }
+}
+
+/// The whole evidence, with criterion 5 answered by `criteria`.
+fn with_criteria(criteria: Vec<CriterionEvidence>) -> CompletionEvidence {
+    CompletionEvidence {
+        acceptance: AcceptanceEvidence::Evaluated { criteria },
+        ..evidence()
+    }
+}
+
+#[test]
+fn a_criterion_bound_to_a_check_that_failed_refuses_completion() {
+    // The load-bearing word in §4.5's criterion 5 is *passing*. A criterion
+    // bound to a check that ran and failed is bound to nothing that proves it,
+    // and a gate that read "is it bound?" rather than "did it pass?" would let
+    // a task complete on the strength of a failing test being *mentioned*.
+    let e = with_criteria(vec![criterion(
+        "AC-1",
+        &["unit-tests"],
+        vec![CheckEvidence {
+            check_id: "unit-tests".to_string(),
+            outcome: VerificationOutcome::Fail,
+            tree_hash: TREE.to_string(),
+        }],
+    )]);
+    let refusals = evaluate(&e).expect_err("criterion 5");
+    let refusal = refusals
+        .iter()
+        .find(|r| r.criterion == Criterion::AcceptanceBindings)
+        .unwrap_or_else(|| panic!("{refusals:?}"));
+    assert!(
+        refusal.detail.contains("AC-1") && refusal.detail.contains("unit-tests"),
+        "{refusal:?}"
+    );
+}
+
+#[test]
+fn a_manual_criterion_can_never_be_satisfied_mechanically() {
+    // §3.7's escape hatch: "mark it `manual: true`, which forces a review
+    // boundary." Bound here to a check that passed, because `manual` is not a
+    // claim about how much evidence exists — it is a claim that mechanical
+    // evidence is not what settles this question.
+    let mut c = criterion("AC-2", &["unit-tests"], vec![passing("unit-tests")]);
+    c.manual = true;
+    let refusals = evaluate(&with_criteria(vec![c])).expect_err("criterion 5");
+    let refusal = refusals
+        .iter()
+        .find(|r| r.criterion == Criterion::AcceptanceBindings)
+        .unwrap_or_else(|| panic!("{refusals:?}"));
+    assert!(refusal.detail.contains("AC-2"), "{refusal:?}");
+}
+
+#[test]
+fn a_criterion_bound_to_a_passing_check_satisfies_criterion_five() {
+    // **Positive control.** A criterion 5 that refused every task would satisfy
+    // both tests above and complete nothing, so the satisfied case is asserted
+    // in the same breath — including that the criterion leaves the deferred
+    // list, which is what distinguishes "evaluated and held" from "skipped".
+    let verified = evaluate(&with_criteria(vec![criterion(
+        "AC-1",
+        &["unit-tests"],
+        vec![passing("unit-tests")],
+    )]))
+    .expect("a criterion bound to a passing check is satisfied");
+    assert_eq!(verified.deferred(), &[Criterion::PolicyGrants]);
+}
+
+#[test]
+fn one_passing_check_is_enough_even_when_a_sibling_check_failed() {
+    // §4.5 says "≥1 passing check", not "all of them". The failing sibling is
+    // still refused — by criterion 1, 2 or 3, wherever it belongs — so reading
+    // criterion 5 as "all" would make it a duplicate of those rather than the
+    // separate question it is.
+    let e = with_criteria(vec![criterion(
+        "AC-1",
+        &["unit-tests", "smoke"],
+        vec![
+            CheckEvidence {
+                check_id: "smoke".to_string(),
+                outcome: VerificationOutcome::Fail,
+                tree_hash: TREE.to_string(),
+            },
+            passing("unit-tests"),
+        ],
+    )]);
+    let verified = evaluate(&e).expect("one bound check passed");
+    assert_eq!(verified.deferred(), &[Criterion::PolicyGrants]);
+}
+
+#[test]
+fn a_criterion_whose_only_pass_was_on_another_tree_does_not_count() {
+    // The same rule criteria 1–3 obey — "PASS **at the current tree hash**" —
+    // applied where it is easiest to forget, because criterion 5 goes looking
+    // for a pass by name rather than iterating a group.
+    let e = with_criteria(vec![criterion(
+        "AC-1",
+        &["unit-tests"],
+        vec![CheckEvidence {
+            check_id: "unit-tests".to_string(),
+            outcome: VerificationOutcome::Pass,
+            tree_hash: "tree-from-two-edits-ago".to_string(),
+        }],
+    )]);
+    let refusals = evaluate(&e).expect_err("a stale pass proves nothing about this tree");
+    assert!(
+        refusals
+            .iter()
+            .any(|r| r.criterion == Criterion::AcceptanceBindings)
+    );
+}
+
+#[test]
+fn a_criterion_naming_a_check_that_never_ran_refuses_completion() {
+    // A conditional check whose trigger did not match produces no result, and
+    // "no result" is not a pass. Fail closed: the criterion names something
+    // nobody measured.
+    let e = with_criteria(vec![criterion("AC-1", &["migration-validate"], Vec::new())]);
+    let refusals = evaluate(&e).expect_err("criterion 5");
+    let refusal = refusals
+        .iter()
+        .find(|r| r.criterion == Criterion::AcceptanceBindings)
+        .unwrap_or_else(|| panic!("{refusals:?}"));
+    assert!(
+        refusal.detail.contains("migration-validate"),
+        "the refusal must name the check that produced nothing: {refusal:?}"
+    );
+}
+
+#[test]
+fn an_evaluation_that_names_no_criterion_refuses_rather_than_passing_vacuously() {
+    // `Evaluated { criteria: [] }` is a caller saying "I evaluated the criteria"
+    // and naming none, which asserts nothing at all. A plan that declares none
+    // says so with `NoCriteria`; a task no plan was ever materialized for says
+    // so with `NotEvaluated`. Leaving a third, vacuously-true spelling would
+    // make the empty vector the easiest way to switch criterion 5 off.
+    let refusals = evaluate(&with_criteria(Vec::new())).expect_err("criterion 5");
+    assert!(
+        refusals
+            .iter()
+            .any(|r| r.criterion == Criterion::AcceptanceBindings)
+    );
+}
+
+#[test]
+fn a_plan_that_declares_no_criteria_is_a_different_fact_from_no_plan_at_all() {
+    // Schema v8's `NULL` versus `'[]'`, at the gate. Both let the task through
+    // — a criterion-less task is still held to criteria 1–4 and 6–7, which is
+    // what stops this being a hole — but only one of them has been *answered*.
+    // Conflating them would let a pre-S11 row, which nobody has ever checked,
+    // report itself as checked and found empty.
+    let declared_none = CompletionEvidence {
+        acceptance: AcceptanceEvidence::NoCriteria,
+        ..evidence()
+    };
+    assert_eq!(
+        evaluate(&declared_none)
+            .expect("nothing to require")
+            .deferred(),
+        &[Criterion::PolicyGrants],
+        "a plan that declares no criteria has answered criterion 5"
+    );
+
+    let never_materialized = evidence();
+    assert_eq!(
+        evaluate(&never_materialized).expect("gate").deferred(),
+        &[Criterion::AcceptanceBindings, Criterion::PolicyGrants],
+        "a task no plan was materialized for has not answered it"
     );
 }
 

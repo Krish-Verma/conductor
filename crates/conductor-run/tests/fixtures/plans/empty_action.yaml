@@ -1,0 +1,29 @@
+# `valid.yaml` with one defect: T-0001's second `actions` entry is whitespace.
+#
+# Not a §3.7 rule — see `plan::validate`'s module docs — but the same
+# reasoning as `empty_id.yaml`: a blank action addresses nothing.
+# `git.push` stays alongside it so the fixture also proves a *non-blank*
+# action in the same list does not itself trip the rule.
+plan:
+  id: p-fixture
+  version: 3
+  objective: "A task declaring one usable action and one blank one."
+  milestones:
+    - id: M-01
+      title: "Plan core"
+      slices:
+        - id: S-11
+          title: "Plan ledger"
+          tasks:
+            - id: T-0001
+              objective: "Model the plan document."
+              depends_on: []
+              actions: ["git.push", "   "]
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "The model deserialises the fixture plans."
+                  verified_by: [unit-tests]

@@ -25,3 +25,6 @@ scripts/measure/*.tmp/
 
 # OS
 .DS_Store
+
+# Agent worktrees created by the harness. Scratch, never committed.
+.claude/

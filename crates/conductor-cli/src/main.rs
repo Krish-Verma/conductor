@@ -3,12 +3,17 @@
 //! S1 shipped one command: `doctor`. S5 adds `task run|show|list` — §7.1's core
 //! verb and the two commands that read what it did. S7 adds `policy explain`,
 //! §7.1's "why was this denied — the 2 a.m. command". S8 adds `approval
-//! list|show|approve|deny|revoke` over the control socket of §7.3. The rest of
-//! §7.1's thirteen arrive with the slices that implement them.
+//! list|show|approve|deny|revoke` over the control socket of §7.3. S11 adds
+//! `init` — §7.1's first line, and the command `project add` was folded into —
+//! and `plan validate|approve`. The rest of §7.1's thirteen arrive with the
+//! slices that implement them.
 
 mod approval;
 mod doctor;
+mod init;
+mod plan;
 mod policy;
+mod recover;
 mod socket;
 mod task;
 
@@ -67,8 +72,19 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Scaffold §3.1's `.conductor/` in the current repository.
+    Init(init::InitArgs),
     /// Report on the store, git, adapters and the control-socket directory.
     Doctor(doctor::DoctorArgs),
+    /// Validate a plan version, and approve one over the control socket.
+    Plan {
+        #[command(subcommand)]
+        command: plan::PlanCommand,
+        #[command(flatten)]
+        shared: plan::PlanArgs,
+        #[command(flatten)]
+        socket: approval::SocketArgs,
+    },
     /// Run, inspect and list tasks.
     Task {
         #[command(subcommand)]
@@ -83,6 +99,8 @@ enum Commands {
         #[command(flatten)]
         shared: task::StoreArgs,
     },
+    /// Rebuild project truth from `.conductor/` after the store is lost (§3.5).
+    Recover(recover::RecoverArgs),
     /// List, inspect, grant, refuse and revoke approvals over the control
     /// socket (§4.3, §7.3).
     Approval {
@@ -109,9 +127,16 @@ fn main() -> ExitCode {
     };
 
     match cli.command {
+        Commands::Init(args) => init::run(&args),
         Commands::Doctor(args) => run_doctor(&args),
+        Commands::Plan {
+            command,
+            shared,
+            socket,
+        } => plan::run(&command, &shared, &socket),
         Commands::Task { command, shared } => task::run(&command, &shared),
         Commands::Policy { command, shared } => policy::run(&command, &shared),
+        Commands::Recover(args) => recover::run(&args),
         Commands::Approval {
             command,
             shared,

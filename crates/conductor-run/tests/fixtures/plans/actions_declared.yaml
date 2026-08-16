@@ -1,0 +1,53 @@
+# `valid.yaml` with one addition: T-0001 declares `actions: [git.push]`.
+#
+# Two things this fixture is for, both in `plan_validate.rs`:
+#
+#   * A task's `actions` round-trips through `parse` and is reachable from
+#     `ValidatedPlan` — `git.push` is a §4.4 taxonomy string, chosen because
+#     it is the action §4.3's binding-rule example (`approval::gate`) also
+#     uses, so a reader who follows the citation lands on a familiar name.
+#   * Declaring `actions:` changes the content hash relative to `valid.yaml`,
+#     which has none — proving the field the model now carries actually
+#     reaches the digest, the same way `future_field.yaml` proves it for a
+#     key the model does not model at all.
+plan:
+  id: p-fixture
+  version: 3
+  objective: "Prove that the S11 plan core accepts a well-formed plan."
+  milestones:
+    - id: M-01
+      title: "Plan core"
+      slices:
+        - id: S-11
+          title: "Plan ledger"
+          tasks:
+            - id: T-0001
+              objective: "Model the plan document."
+              rationale: "Nothing downstream can be checked until the shape exists."
+              depends_on: []
+              actions: [git.push]
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              attempt_budget: 3
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "The model deserialises the fixture plans."
+                  verified_by: [unit-tests]
+            - id: T-0002
+              objective: "Validate the plan document."
+              rationale: "An unbound criterion is how a task completes on an agent's word."
+              depends_on: [T-0001]
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              attempt_budget: 3
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "Every refusal names the offending id."
+                  verified_by: [unit-tests, typecheck]
+                - id: AC-2
+                  statement: "No secret reaches the validation report."
+                  verified_by: [no-secrets]

@@ -1,0 +1,41 @@
+# `valid.yaml` with one defect: T-0002's AC-1 binds to `does-not-exist`, which
+# `verification.yaml` does not define.
+#
+# §3.7 refuses "verification IDs absent from `verification.yaml`". The criterion
+# looks bound — it has a non-empty `verified_by` — so the unbound-criterion rule
+# is satisfied. That is exactly why this needs its own rule: a binding to a
+# check that never runs completes a task on nothing at all, and it does it while
+# reading as rigorous.
+plan:
+  id: p-fixture
+  version: 3
+  objective: "A criterion binds to a check nothing defines."
+  milestones:
+    - id: M-01
+      title: "Plan core"
+      slices:
+        - id: S-11
+          title: "Plan ledger"
+          tasks:
+            - id: T-0001
+              objective: "Model the plan document."
+              depends_on: []
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "The model deserialises the fixture plans."
+                  verified_by: [unit-tests]
+            - id: T-0002
+              objective: "Validate the plan document."
+              depends_on: [T-0001]
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "Every refusal names the offending id."
+                  verified_by: [does-not-exist]

@@ -1,0 +1,39 @@
+# `valid.yaml` with one defect: T-0001 and T-0002 depend on each other.
+#
+# Every id resolves, so the dangling-dependency rule is silent here — which is
+# the point. A cycle is a plan in which no task is ever `READY`: §5.2's task
+# machine leaves `PENDING` only on "deps met", and neither task's deps can be
+# met first. Conductor would sit there reporting nothing wrong.
+plan:
+  id: p-fixture
+  version: 3
+  objective: "Two tasks wait for each other forever."
+  milestones:
+    - id: M-01
+      title: "Plan core"
+      slices:
+        - id: S-11
+          title: "Plan ledger"
+          tasks:
+            - id: T-0001
+              objective: "Model the plan document."
+              depends_on: [T-0002]
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "The model deserialises the fixture plans."
+                  verified_by: [unit-tests]
+            - id: T-0002
+              objective: "Validate the plan document."
+              depends_on: [T-0001]
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "Every refusal names the offending id."
+                  verified_by: [unit-tests]

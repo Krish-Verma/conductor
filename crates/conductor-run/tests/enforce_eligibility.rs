@@ -23,6 +23,20 @@
 //! one seeded probe row. A refusal test alone would pass against a build that
 //! refuses everything, which is the failure mode S8 found twice in its own
 //! approval tests.
+//!
+//! # S11 — §4.3's binding rule, at the same call site
+//!
+//! > **Binding rule:** a task whose policy can produce an approval gate **may
+//! > not run unattended** below tier A. Enforced by §4.2's eligibility check,
+//! > not by documentation.
+//!
+//! S9 left that half unwired and said so, because the rule needs the set of
+//! actions a task may perform and no task could declare one. S11's plan
+//! document can, and materialization writes it to `task.declared_actions`, so
+//! the second group of tests below drives the rule through the same
+//! `vertical::run_task` entry point — never through
+//! `approval::gate::unattended_requirements` directly, for the same reason the
+//! first group never calls `eligibility::check`.
 
 mod common;
 
@@ -34,6 +48,8 @@ use common::vertical::{RUN, TASK, World};
 use conductor_core::containment::{Enforcement, ExecutionCapabilities};
 use conductor_core::{RunId, RunState, TaskId, TaskState};
 use conductor_run::containment::cache::{ProbeKey, upsert};
+use conductor_run::policy::load::{parse_document, persist, resolve_documents, snapshot};
+use conductor_run::policy::model::Origin;
 use conductor_run::vertical::{VerticalConfig, VerticalOutcome, run_task};
 
 /// The probe key every test in this file uses. Fixed strings: what varies is
@@ -81,6 +97,8 @@ fn config(world: &World) -> VerticalConfig {
         startup_grace: Duration::from_secs(30),
         sensitive: Default::default(),
         agent_env_extra: BTreeMap::new(),
+        // The fake agent authenticates against nothing.
+        credential_home: None,
         probe_key: probe_key(),
     }
 }
@@ -105,6 +123,71 @@ fn require(world: &World, yaml: &str) {
 fn measure(world: &World, caps: &ExecutionCapabilities) {
     let mut store = world.store();
     upsert(store.conn_mut(), &probe_key(), caps, 1_000).expect("upsert probe");
+}
+
+/// A policy that **can** produce an approval gate for `git.push`.
+const GATES_PUSH: &str =
+    "policy:\n  rules:\n    - {id: g.push, action: git.push, effect: require_approval}\n";
+
+/// A policy that gates something else entirely, so `git.push` is ungateable
+/// under it. The negative half of §4.3's predicate, and the reason the
+/// permitted path is a real path rather than an unreachable one.
+const GATES_ONLY_DEPLOY: &str = "policy:\n  rules:\n    - {id: g.deploy, action: \
+     deployment.execute, effect: require_approval}\n";
+
+/// Pin the run to a real policy snapshot.
+///
+/// The fixture seeds a placeholder blob, which is enough for every test that
+/// never asks what the policy says. §4.3's rule does ask, and it asks through
+/// `run.policy_hash → policy_snapshot` — the run's own pinned snapshot, not a
+/// file and not a value a caller supplies (§4.4, acceptance row 23) — so these
+/// tests put a decodable one there and repoint the run at it.
+fn pin_policy(world: &World, yaml: &str) {
+    let document = parse_document(yaml, Origin::Global).expect("parse policy");
+    let policy = resolve_documents(Some(document), None, None).expect("resolve policy");
+    let taken = snapshot(&policy);
+    let mut store = world.store();
+    persist(store.conn_mut(), &taken, 0).expect("persist snapshot");
+    store
+        .conn()
+        .execute(
+            "UPDATE run SET policy_hash = ?1 WHERE id = ?2",
+            rusqlite::params![taken.hash, RUN],
+        )
+        .expect("pin the run to it");
+}
+
+/// Pin the run to a snapshot whose blob does not decode.
+///
+/// Not a corrupted *hash* — the row exists and is found. What cannot be
+/// established is what the rules are, which is the input §4.3's question needs
+/// and the one this fixture removes.
+fn corrupt_policy(world: &World) {
+    let store = world.store();
+    store
+        .conn()
+        .execute(
+            "INSERT OR REPLACE INTO policy_snapshot (hash, canonical_blob, created_at)
+             VALUES ('blake3:unreadable', 'this is not a canonical policy', 0)",
+            [],
+        )
+        .expect("insert snapshot");
+    store
+        .conn()
+        .execute(
+            "UPDATE run SET policy_hash = 'blake3:unreadable' WHERE id = ?1",
+            rusqlite::params![RUN],
+        )
+        .expect("pin the run to it");
+}
+
+/// Write the task's materialized `declared_actions` column, as S11's plan
+/// materializer would. `None` leaves it `NULL` — never materialized.
+fn declare(world: &World, json: Option<&str>) {
+    let mut store = world.store();
+    store
+        .set_declared_actions(&TaskId::new(TASK).expect("id"), json)
+        .expect("declare actions");
 }
 
 fn attempts(world: &World) -> usize {
@@ -361,4 +444,307 @@ fn an_unparseable_requirement_refuses_rather_than_defaulting_to_none() {
     assert_eq!(attempts(&world), 0);
     assert_eq!(world.run_state(), RunState::Blocked);
     let _ = error;
+}
+
+// ---------------------------------------------------------------------------
+// S11 — §4.3's binding rule
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_declared_action_the_policy_cannot_gate_launches_on_a_host_below_tier_a() {
+    // The permitted half of §4.3's predicate. The task declares `git.push`, the
+    // host has never been probed — so `control_surface` measures `None`, which
+    // is below tier A — and the launch proceeds, because nothing in this policy
+    // can turn `git.push` into an approval gate and a task that cannot be gated
+    // has no approval integrity to protect.
+    //
+    // **Positive control: this cannot fail before the rule is wired.** It exists
+    // so that the refusal below is a statement about *this policy*, not about
+    // any task that declares anything.
+    let world = World::new();
+    pin_policy(&world, GATES_ONLY_DEPLOY);
+    declare(&world, Some(r#"["git.push"]"#));
+
+    let mut store = world.store();
+    let vertical = run_task(
+        &mut store,
+        &success_adapter(&world),
+        &config(&world),
+        &mut (),
+    )
+    .expect("a task whose declared action nothing can gate must launch");
+    assert!(
+        matches!(vertical.outcome, VerticalOutcome::Complete { .. }),
+        "the ungateable run did not complete: {:?}",
+        vertical.outcome
+    );
+    assert_eq!(attempts(&world), 1, "the agent did not actually run");
+}
+
+#[test]
+fn a_declared_action_the_policy_can_gate_may_not_run_unattended_below_tier_a() {
+    // §4.3's binding rule, on the same unprobed host as the test above and with
+    // one thing changed: the policy can produce an approval gate for the action
+    // the task declares.
+    //
+    // The task's own `execution_requirements` column is untouched, deliberately.
+    // §4.3 is the *only* source of the requirement here, so a build that read
+    // the task's vector and stopped — which is exactly what S9 shipped — lets
+    // this launch.
+    let world = World::new();
+    pin_policy(&world, GATES_PUSH);
+    declare(&world, Some(r#"["git.push"]"#));
+
+    let mut store = world.store();
+    let outcome = run_task(
+        &mut store,
+        &success_adapter(&world),
+        &config(&world),
+        &mut (),
+    );
+
+    match outcome {
+        Ok(vertical) => panic!(
+            "a task whose policy can gate its declared action ran unattended \
+             below tier A and produced {:?}",
+            vertical.outcome
+        ),
+        Err(error) => {
+            let text = error.to_string();
+            // Row 30's "refuse with dimension named", for the dimension §4.3's
+            // tier A *is*: `control_surface: Hard` (M10, M11).
+            assert!(
+                text.contains("control_surface"),
+                "the refusal does not name the dimension: {text}"
+            );
+        }
+    }
+
+    assert_eq!(attempts(&world), 0, "an attempt row was created");
+    assert!(
+        !world.workspace().exists(),
+        "a workspace was cloned for a run that was refused"
+    );
+    assert_eq!(world.run_state(), RunState::Blocked);
+    assert_eq!(world.task_state(), TaskState::Blocked);
+
+    let findings = world
+        .store()
+        .findings_for_run(&RunId::new(RUN).expect("id"))
+        .expect("findings");
+    let refusal = findings
+        .iter()
+        .find(|f| f.kind == "INELIGIBLE_EXECUTION_MODE")
+        .expect("a refusal finding");
+    assert_eq!(refusal.severity, "CRITICAL");
+    assert!(refusal.resolution.is_none(), "findings never auto-resolve");
+    assert!(
+        refusal.evidence_ref.contains("control_surface"),
+        "the finding does not name the dimension: {}",
+        refusal.evidence_ref
+    );
+}
+
+#[test]
+fn the_same_gateable_task_launches_on_a_host_measured_hard() {
+    // The positive control for the test above, and the one that keeps the rule
+    // from being "refuse every task that declares an action". Identical fixture,
+    // one seeded probe row: this host is measured at tier A, so the binding rule
+    // is satisfied rather than violated.
+    //
+    // **Positive control: this cannot fail before the rule is wired** — an
+    // unwired gate launches it too. It fails against an over-eager wiring, which
+    // is the failure mode it exists to catch.
+    let world = World::new();
+    pin_policy(&world, GATES_PUSH);
+    declare(&world, Some(r#"["git.push"]"#));
+    measure(&world, &measured_hard());
+
+    let mut store = world.store();
+    let vertical = run_task(
+        &mut store,
+        &success_adapter(&world),
+        &config(&world),
+        &mut (),
+    )
+    .expect("a gateable task on a tier A host must launch");
+    assert!(
+        matches!(vertical.outcome, VerticalOutcome::Complete { .. }),
+        "the contained run did not complete: {:?}",
+        vertical.outcome
+    );
+    assert_eq!(attempts(&world), 1, "the agent did not actually run");
+    assert_ne!(world.run_state(), RunState::Blocked);
+}
+
+#[test]
+fn a_task_never_materialized_from_a_plan_is_not_gated_by_the_binding_rule() {
+    // `declared_actions` is `NULL`: no plan document has ever been read for this
+    // task, which is every task row written before schema v8 and every task the
+    // CLI's `create_task` still writes. Schema v8's own note is the reason this
+    // is not treated as "declares nothing gateable" — the honest statement about
+    // such a row is "never checked", not "checked and found empty".
+    //
+    // Fail-closed would argue for refusing it. It does not, and that is a
+    // deliberate ruling rather than an oversight: gating `NULL` would change the
+    // meaning of every existing task row, and §4.3's rule would be enforced
+    // against tasks whose declaration nobody has ever been asked for. The
+    // pre-S11 behaviour is preserved and named, so it cannot be mistaken for the
+    // rule having been applied and passed.
+    //
+    // **Positive control: this cannot fail before the rule is wired.**
+    let world = World::new();
+    pin_policy(&world, GATES_PUSH);
+    // No `declare(...)` call: the column stays `NULL`.
+
+    let mut store = world.store();
+    let vertical = run_task(
+        &mut store,
+        &success_adapter(&world),
+        &config(&world),
+        &mut (),
+    )
+    .expect("a pre-S11 task keeps its S9 behaviour");
+    assert!(matches!(vertical.outcome, VerticalOutcome::Complete { .. }));
+    assert_eq!(attempts(&world), 1);
+}
+
+#[test]
+fn a_task_that_materialized_an_empty_action_list_has_nothing_to_gate() {
+    // `'[]'`: a plan document *was* read, and its author declared zero actions.
+    // The rule is applied and answers "no gate is possible", which is a
+    // different fact from the `NULL` case above reaching the same launch.
+    //
+    // **Positive control: this cannot fail before the rule is wired.**
+    let world = World::new();
+    pin_policy(&world, GATES_PUSH);
+    declare(&world, Some("[]"));
+
+    let mut store = world.store();
+    let vertical = run_task(
+        &mut store,
+        &success_adapter(&world),
+        &config(&world),
+        &mut (),
+    )
+    .expect("a task that declares no action must launch");
+    assert!(matches!(vertical.outcome, VerticalOutcome::Complete { .. }));
+    assert_eq!(attempts(&world), 1);
+}
+
+#[test]
+fn a_materialized_task_is_refused_when_the_runs_policy_cannot_be_read_and_a_never_materialized_one_is_not()
+ {
+    // The behavioural difference between `NULL` and `'[]'`, which is the whole
+    // reason schema v8 keeps them apart.
+    //
+    // §4.3's predicate has two operands — *"a task whose **policy** can produce
+    // an approval gate"* — so answering it for a materialized task means reading
+    // the policy its run is pinned to. Both halves of this test point their run
+    // at a snapshot row that exists and does not decode.
+    //
+    // * `NULL`: the rule does not apply, nothing asks what the policy says, and
+    //   the launch proceeds exactly as it did at S9.
+    // * `'[]'`: the rule applies, its second operand cannot be established, and
+    //   an undecided rule is a refusal — never an empty policy, which would
+    //   allow everything. The same reading `enforce::policy_gate` already takes
+    //   of an undecodable snapshot.
+    //
+    // Collapsing the two would make a row nobody has ever materialized
+    // indistinguishable from one that was materialized and proved harmless.
+    let never_materialized = World::new();
+    corrupt_policy(&never_materialized);
+    {
+        let mut store = never_materialized.store();
+        let vertical = run_task(
+            &mut store,
+            &success_adapter(&never_materialized),
+            &config(&never_materialized),
+            &mut (),
+        )
+        .expect("a task no plan has ever described keeps its S9 behaviour");
+        assert!(matches!(vertical.outcome, VerticalOutcome::Complete { .. }));
+        assert_eq!(attempts(&never_materialized), 1);
+    }
+
+    let materialized = World::new();
+    corrupt_policy(&materialized);
+    declare(&materialized, Some("[]"));
+    let mut store = materialized.store();
+    let error = run_task(
+        &mut store,
+        &success_adapter(&materialized),
+        &config(&materialized),
+        &mut (),
+    )
+    .expect_err("a rule whose policy cannot be read must refuse");
+    assert!(
+        error.to_string().contains("policy"),
+        "the refusal does not say which operand was missing: {error}"
+    );
+    assert_eq!(attempts(&materialized), 0);
+    assert_eq!(materialized.run_state(), RunState::Blocked);
+}
+
+#[test]
+fn declared_actions_that_are_not_a_json_string_array_refuse_rather_than_gating_nothing() {
+    // The sibling of `an_unparseable_requirement_refuses_rather_than_defaulting_to_none`,
+    // for the column §4.3 reads. A declaration that does not decode leaves the
+    // rule's first operand unknown; treating it as "no actions" would mean the
+    // one task whose declaration went wrong is the one task the rule stops
+    // applying to.
+    let world = World::new();
+    pin_policy(&world, GATES_PUSH);
+    declare(&world, Some(r#"{"git.push": true}"#));
+
+    let mut store = world.store();
+    let error = run_task(
+        &mut store,
+        &success_adapter(&world),
+        &config(&world),
+        &mut (),
+    )
+    .expect_err("an unreadable declaration must refuse");
+    assert!(
+        error.to_string().contains("declared_actions"),
+        "the refusal does not name the column: {error}"
+    );
+    assert_eq!(attempts(&world), 0);
+    assert_eq!(world.run_state(), RunState::Blocked);
+}
+
+#[test]
+fn a_materialized_task_with_no_active_run_has_no_policy_to_ask_and_is_refused() {
+    // The other way the rule's second operand can go missing: the policy §4.3
+    // asks about is *the run's*, and a task with no active run has none. There
+    // is no fallback to a policy on disk — that is what makes an edit to
+    // `.conductor/policy.yaml` unable to change what a run is judged by — so the
+    // rule is undecided, and undecided is a refusal.
+    let world = World::new();
+    pin_policy(&world, GATES_PUSH);
+    declare(&world, Some(r#"["git.push"]"#));
+    {
+        let store = world.store();
+        store
+            .conn()
+            .execute(
+                "UPDATE run SET state = 'CANCELLED' WHERE id = ?1",
+                rusqlite::params![RUN],
+            )
+            .expect("cancel the run");
+    }
+
+    let mut store = world.store();
+    let error = run_task(
+        &mut store,
+        &success_adapter(&world),
+        &config(&world),
+        &mut (),
+    )
+    .expect_err("a task with no run has no pinned policy, so the rule is undecided");
+    assert!(
+        error.to_string().contains("policy"),
+        "the refusal does not say which operand was missing: {error}"
+    );
+    assert_eq!(attempts(&world), 0);
 }

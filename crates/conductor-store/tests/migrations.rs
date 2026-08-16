@@ -368,3 +368,118 @@ fn the_artifact_digest_column_is_named_for_the_hash_conductor_actually_uses() {
         "artifact must not name a hash it does not compute; columns were {cols:?}"
     );
 }
+
+#[test]
+fn migration_8_adds_materialized_plan_columns_and_preserves_v7_rows() {
+    // Acceptance criterion: "Migration 8 applies to a v7 database and
+    // preserves every existing row."
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("conductor.db");
+
+    // Build a v7 database and seed one task the old way — no materialized
+    // plan content, because nothing before S11 could write any.
+    {
+        let mut conn = rusqlite::Connection::open(&path).expect("raw open");
+        conductor_store::schema::apply_pragmas(&conn).expect("pragmas");
+        conductor_store::migrate::apply_up_to(&mut conn, 7).expect("v7 only");
+        assert_eq!(current_version(&conn).expect("version"), Some(7));
+        conn.execute_batch(
+            "INSERT INTO project (id, root_path, repo_identity, default_branch, config_hash, created_at)
+               VALUES ('p-1','/r','blake3:r','main','blake3:c',0);
+             INSERT INTO plan_version (id, project_id, version, content_hash, state, source_path)
+               VALUES ('pv-1','p-1',1,'blake3:p','APPROVED','p.yaml');
+             INSERT INTO task (id, plan_version_id, slice_id, state, scope_globs,
+                               verification_profile, attempt_budget, created_at)
+               VALUES ('T-1','pv-1','S1','READY','[\"src/**\"]','default',3,42);",
+        )
+        .expect("seed a v7 row");
+    }
+
+    let store = Store::open_or_create(&path).expect("migrate forward");
+    assert_eq!(
+        store.schema_version().expect("version"),
+        Some(conductor_store::schema::SUPPORTED_SCHEMA_VERSION)
+    );
+
+    let mut stmt = store
+        .conn()
+        .prepare("SELECT name FROM pragma_table_info('task') ORDER BY cid")
+        .expect("prepare");
+    let columns: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query")
+        .map(|r| r.expect("row"))
+        .collect();
+    for new_col in ["declared_actions", "depends_on", "acceptance_criteria"] {
+        assert!(
+            columns.contains(&new_col.to_string()),
+            "task.{new_col} is missing; have {columns:?}"
+        );
+    }
+    // v7's columns are all still there: this is a forward migration, not a
+    // rewrite.
+    for v7 in [
+        "id",
+        "plan_version_id",
+        "slice_id",
+        "state",
+        "scope_globs",
+        "verification_profile",
+        "attempt_budget",
+        "created_at",
+        "execution_requirements",
+    ] {
+        assert!(columns.contains(&v7.to_string()), "v7 lost column {v7}");
+    }
+
+    // The pre-existing row's v7 data survived untouched.
+    let (state, scope_globs, budget, created_at): (String, String, i64, i64) = store
+        .conn()
+        .query_row(
+            "SELECT state, scope_globs, attempt_budget, created_at FROM task WHERE id='T-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("row survived");
+    assert_eq!(state, "READY");
+    assert_eq!(scope_globs, "[\"src/**\"]");
+    assert_eq!(budget, 3);
+    assert_eq!(created_at, 42);
+
+    assert_eq!(
+        store.integrity_check().expect("integrity"),
+        vec!["ok".to_string()]
+    );
+}
+
+#[test]
+fn migration_8_leaves_the_new_columns_null_on_a_row_written_before_it() {
+    // Ruling 4: NULL means "not materialized from a plan", distinct from
+    // "[]" ("materialized, declares none"). A row that predates S11 must
+    // read as the former — never defaulted to the latter, which would let
+    // §4.3's approval gate treat an unmaterialized task as one that provably
+    // declares no gateable action.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("conductor.db");
+    {
+        let mut conn = rusqlite::Connection::open(&path).expect("raw open");
+        conductor_store::schema::apply_pragmas(&conn).expect("pragmas");
+        conductor_store::migrate::apply_up_to(&mut conn, 7).expect("v7 only");
+        conn.execute_batch(
+            "INSERT INTO project (id, root_path, repo_identity, default_branch, config_hash, created_at)
+               VALUES ('p-1','/r','blake3:r','main','blake3:c',0);
+             INSERT INTO plan_version (id, project_id, version, content_hash, state, source_path)
+               VALUES ('pv-1','p-1',1,'blake3:p','APPROVED','p.yaml');
+             INSERT INTO task (id, plan_version_id, slice_id, state, scope_globs,
+                               verification_profile, attempt_budget, created_at)
+               VALUES ('T-1','pv-1','S1','READY','[]','default',3,0);",
+        )
+        .expect("seed a v7 row");
+    }
+
+    let store = Store::open_or_create(&path).expect("migrate forward");
+    let task_id = conductor_core::TaskId::new("T-1").expect("id");
+    assert_eq!(store.declared_actions(&task_id).expect("read"), None);
+    assert_eq!(store.depends_on(&task_id).expect("read"), None);
+    assert_eq!(store.acceptance_criteria(&task_id).expect("read"), None);
+}

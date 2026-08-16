@@ -710,10 +710,7 @@ fn a_codex_that_outlived_conductor_is_terminated_and_its_attempt_is_stale() {
             .expect("the pid was recorded before the kill")
     };
     assert!(
-        matches!(
-            conductor_run::supervise::probe(pid as i32, 0),
-            conductor_run::supervise::Liveness::Alive(_)
-        ),
+        conductor_run::supervise::start_time_us(pid as i32).is_some(),
         "the agent should have outlived its supervisor; there is nothing to recover otherwise"
     );
 
@@ -729,12 +726,7 @@ fn a_codex_that_outlived_conductor_is_terminated_and_its_attempt_is_stale() {
     common::agent::wait_until(
         "the adopted Codex to be gone",
         Duration::from_secs(10),
-        || {
-            matches!(
-                conductor_run::supervise::probe(pid as i32, 0),
-                conductor_run::supervise::Liveness::Dead
-            )
-        },
+        || conductor_run::supervise::start_time_us(pid as i32).is_none(),
     );
     assert_converged(&world, "live codex at startup");
 }
@@ -1253,6 +1245,12 @@ fn a_real_codex_completes_one_slice_of_real_work_on_a_fixture_repo() {
         startup_grace: Duration::from_secs(30),
         sensitive: SensitivePatterns::default(),
         agent_env_extra: extra,
+        // `None` because [`codex_home`] above already built one, in this test's
+        // own tempdir, before the run existed. The **product** path — the worker
+        // materialising the same directory inside the run's workspace — is
+        // covered by `conductor-cli`'s `codex_credential_home` suite, which
+        // proves it with a synthetic credential and spends no money.
+        credential_home: None,
         // The fixture task declares no `execution_requirements`, so §4.2's gate
         // compares an empty vector and proceeds without consulting the cache.
         // The key is still named honestly: if a later fixture *does* declare a

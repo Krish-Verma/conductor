@@ -29,7 +29,7 @@ fn terminal_evidence(attempt_id: &str, run_id: &str) -> TerminalAttempt {
         1,
     )
     .starting()
-    .active(1, 1)
+    .active(1, Some(1))
     .exited(0)
     .evidence()
 }

@@ -177,6 +177,114 @@ fn tasks_can_be_listed_and_filtered_by_state() {
     assert_eq!(ready[0].id.as_str(), "T-0002");
 }
 
+// ---------------------------------------------------------------------------
+// Materialized plan content (S11 T2, schema v8): NULL vs '[]' is load-bearing
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_freshly_created_task_has_never_materialized_anything() {
+    // `create_task` does not touch the three new columns, so a task nobody
+    // has run a materializer against must read NULL — "never materialized" —
+    // on all three, not the empty-declaration "[]".
+    let (_dir, mut store) = seeded();
+    store.create_task(&new_task(), 0).expect("create");
+
+    assert_eq!(store.declared_actions(&task_id()).expect("read"), None);
+    assert_eq!(store.depends_on(&task_id()).expect("read"), None);
+    assert_eq!(store.acceptance_criteria(&task_id()).expect("read"), None);
+}
+
+#[test]
+fn declaring_zero_actions_is_distinguishable_from_never_having_been_materialized() {
+    // Ruling 4, the load-bearing distinction: NULL ("not materialized") and
+    // "[]" ("materialized, declares none") must not collapse into one value
+    // through this API.
+    let (_dir, mut store) = seeded();
+    store.create_task(&new_task(), 0).expect("create");
+
+    store
+        .set_declared_actions(&task_id(), Some("[]"))
+        .expect("materialize with no declared actions");
+    assert_eq!(
+        store.declared_actions(&task_id()).expect("read"),
+        Some("[]".to_string()),
+        "a materialized-but-empty declaration must read back as '[]', not NULL"
+    );
+
+    // And the same call on depends_on and acceptance_criteria.
+    store
+        .set_depends_on(&task_id(), Some("[]"))
+        .expect("materialize with no dependencies");
+    assert_eq!(
+        store.depends_on(&task_id()).expect("read"),
+        Some("[]".to_string())
+    );
+    store
+        .set_acceptance_criteria(&task_id(), Some("[]"))
+        .expect("materialize with no acceptance criteria");
+    assert_eq!(
+        store.acceptance_criteria(&task_id()).expect("read"),
+        Some("[]".to_string())
+    );
+}
+
+#[test]
+fn a_non_empty_declaration_round_trips_as_the_plan_model_wrote_it() {
+    let (_dir, mut store) = seeded();
+    store.create_task(&new_task(), 0).expect("create");
+
+    store
+        .set_declared_actions(&task_id(), Some("[\"git.push\"]"))
+        .expect("materialize an action");
+    assert_eq!(
+        store.declared_actions(&task_id()).expect("read"),
+        Some("[\"git.push\"]".to_string())
+    );
+
+    store
+        .set_depends_on(&task_id(), Some("[\"T-0001\"]"))
+        .expect("materialize a dependency");
+    assert_eq!(
+        store.depends_on(&task_id()).expect("read"),
+        Some("[\"T-0001\"]".to_string())
+    );
+
+    let criterion = "[{\"id\":\"AC-1\",\"statement\":\"it works\",\"verified_by\":[\"typecheck\"],\"manual\":false}]";
+    store
+        .set_acceptance_criteria(&task_id(), Some(criterion))
+        .expect("materialize a criterion");
+    assert_eq!(
+        store.acceptance_criteria(&task_id()).expect("read"),
+        Some(criterion.to_string())
+    );
+}
+
+#[test]
+fn clearing_a_materialized_declaration_returns_it_to_never_materialized() {
+    // `None` is not "materialized as empty" either — it is the same "never
+    // materialized" fact a fresh task starts with.
+    let (_dir, mut store) = seeded();
+    store.create_task(&new_task(), 0).expect("create");
+    store
+        .set_declared_actions(&task_id(), Some("[\"git.push\"]"))
+        .expect("materialize");
+
+    store.set_declared_actions(&task_id(), None).expect("clear");
+    assert_eq!(store.declared_actions(&task_id()).expect("read"), None);
+}
+
+#[test]
+fn setting_materialized_content_on_a_task_that_does_not_exist_is_refused() {
+    let (_dir, mut store) = seeded();
+    let error = store
+        .set_declared_actions(&TaskId::new("T-ghost").expect("id"), Some("[]"))
+        .expect_err("no such task");
+    assert!(
+        error.to_string().contains("T-ghost"),
+        "the refusal must name the task: {error}"
+    );
+}
+
 #[test]
 fn an_older_database_gains_the_target_branch_column_by_migration() {
     // Forward-only, and it must work on a database written *before* the column
@@ -250,7 +358,7 @@ fn run_in_verifying(store: &mut Store) -> conductor_core::Fence {
         1,
     )
     .starting()
-    .active(1, 1)
+    .active(1, Some(1))
     .exited(0);
     store
         .advance_to_reconciling(&fence, &attempt.evidence(), 0)
@@ -351,7 +459,7 @@ fn reconciliation_cannot_route_straight_to_complete() {
         1,
     )
     .starting()
-    .active(1, 1)
+    .active(1, Some(1))
     .exited(0);
     store
         .advance_to_reconciling(&fence, &attempt.evidence(), 0)

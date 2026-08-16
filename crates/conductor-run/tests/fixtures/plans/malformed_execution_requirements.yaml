@@ -1,0 +1,37 @@
+# `valid.yaml` with one defect: T-0001 declares an `execution_requirements`
+# override, but the block is mis-nested — it has no top-level
+# `execution_requirements:` key, so `ExecutionRequirements::parse_yaml`
+# would read it and find nothing to gate.
+#
+# `enforce::launch::requirements_for`'s doc comment is the reason this is a
+# refusal and not "no requirements": the distinction that matters is *absent*
+# (nothing gated, deliberately) versus *present and meaningless* (somebody
+# meant something and it did not survive). A plan carrying this override
+# would refuse every unattended launch of T-0001 through that path; this
+# fixture proves `plan validate` catches it first, while a human can still
+# read the file.
+plan:
+  id: p-fixture
+  version: 3
+  objective: "A task whose execution_requirements override is mis-nested."
+  milestones:
+    - id: M-01
+      title: "Plan core"
+      slices:
+        - id: S-11
+          title: "Plan ledger"
+          tasks:
+            - id: T-0001
+              objective: "Model the plan document."
+              depends_on: []
+              execution_requirements: |
+                project:
+                  adapter: codex
+              scope:
+                allowed_globs: ["crates/conductor-run/src/plan/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: default
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "The model deserialises the fixture plans."
+                  verified_by: [unit-tests]

@@ -256,3 +256,112 @@ pub fn set_execution_requirements(
     }
     Ok(())
 }
+
+// -- materialized plan content (S11 T2, schema v8) --------------------------
+//
+// `declared_actions`, `depends_on` and `acceptance_criteria` share one shape
+// of getter/setter, for the reason [`crate::schema::SCHEMA_V8`] gives at
+// length: all three are the plan model's own JSON, handed back exactly as
+// written rather than decoded here, and `NULL` (never materialized) must stay
+// distinguishable from `'[]'` (materialized, declares none). A macro would
+// save the repetition; three functions is not enough of it to buy the
+// indirection, and each pair earns its own doc comment naming what it mirrors.
+
+/// A task's materialized `declared_actions` — §4.4 action names, as the plan
+/// model wrote them.
+///
+/// `None` means no plan document has ever been read for this task. `Some`
+/// holds raw JSON — `"[]"` for "materialized, authorizes nothing" and
+/// `"[\"git.push\"]"` for a declared action — because decoding it is
+/// `conductor-run`'s job, not this crate's; see `SCHEMA_V8`.
+pub fn declared_actions(conn: &Connection, id: &TaskId) -> StoreResult<Option<String>> {
+    let value: Option<Option<String>> = conn
+        .query_row(
+            "SELECT declared_actions FROM task WHERE id = ?1",
+            params![id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(value.flatten())
+}
+
+/// Record a task's materialized `declared_actions`. `None` clears it back to
+/// "never materialized" — not the same fact as `Some("[]")`; see `SCHEMA_V8`.
+pub fn set_declared_actions(
+    conn: &mut Connection,
+    id: &TaskId,
+    json: Option<&str>,
+) -> StoreResult<()> {
+    let changed = conn.execute(
+        "UPDATE task SET declared_actions = ?2 WHERE id = ?1",
+        params![id.as_str(), json],
+    )?;
+    if changed == 0 {
+        return Err(StoreError::NoSuchTask(id.as_str().to_string()));
+    }
+    Ok(())
+}
+
+/// A task's materialized `depends_on` — task ids that must reach `COMPLETE`
+/// first (§5.2's "deps met"), as the plan model wrote them.
+///
+/// Same `None`/`Some("[]")` distinction as [`declared_actions`]: `None` is
+/// "never materialized", `Some("[]")` is "materialized, depends on nothing".
+pub fn depends_on(conn: &Connection, id: &TaskId) -> StoreResult<Option<String>> {
+    let value: Option<Option<String>> = conn
+        .query_row(
+            "SELECT depends_on FROM task WHERE id = ?1",
+            params![id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(value.flatten())
+}
+
+/// Record a task's materialized `depends_on`. `None` clears it back to "never
+/// materialized".
+pub fn set_depends_on(conn: &mut Connection, id: &TaskId, json: Option<&str>) -> StoreResult<()> {
+    let changed = conn.execute(
+        "UPDATE task SET depends_on = ?2 WHERE id = ?1",
+        params![id.as_str(), json],
+    )?;
+    if changed == 0 {
+        return Err(StoreError::NoSuchTask(id.as_str().to_string()));
+    }
+    Ok(())
+}
+
+/// A task's materialized `acceptance_criteria` — what §4.5's completion
+/// criterion 5 binds against, as the plan model wrote them.
+///
+/// Same `None`/`Some("[]")` distinction as [`declared_actions`]: `None` is
+/// "never materialized", `Some("[]")` is "materialized, no criteria bind it" —
+/// which §3.7 already refuses at validation, but this layer records the fact
+/// rather than judging it.
+pub fn acceptance_criteria(conn: &Connection, id: &TaskId) -> StoreResult<Option<String>> {
+    let value: Option<Option<String>> = conn
+        .query_row(
+            "SELECT acceptance_criteria FROM task WHERE id = ?1",
+            params![id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(value.flatten())
+}
+
+/// Record a task's materialized `acceptance_criteria`. `None` clears it back
+/// to "never materialized".
+pub fn set_acceptance_criteria(
+    conn: &mut Connection,
+    id: &TaskId,
+    json: Option<&str>,
+) -> StoreResult<()> {
+    let changed = conn.execute(
+        "UPDATE task SET acceptance_criteria = ?2 WHERE id = ?1",
+        params![id.as_str(), json],
+    )?;
+    if changed == 0 {
+        return Err(StoreError::NoSuchTask(id.as_str().to_string()));
+    }
+    Ok(())
+}

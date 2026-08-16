@@ -254,8 +254,9 @@ pub fn recover_one(
     let attempts = store.attempts_for_run(&run_id)?;
     for row in attempts.iter().filter(|a| a.state.is_in_flight()) {
         let attempt = Attempt::create(row.id.clone(), run_id.clone(), row.ordinal);
-        match (row.pid, row.pid_start_time) {
-            (Some(pid), Some(start)) => match probe(pid, start) {
+        let start = recorded_start_time(row);
+        match row.pid {
+            Some(pid) => match probe(pid, start) {
                 Liveness::Alive(_) if config.adopt_live_agents => {
                     decisions.push(RecoveryDecision::AdoptedLiveAgent {
                         run_id: run_id.clone(),
@@ -308,12 +309,38 @@ pub fn recover_one(
                     store.record_attempt_terminal(fence, &stale, now_ms)?;
                     let reconciled = stale.reconciled();
                     store.record_attempt_reconciled(fence, &reconciled, now_ms)?;
+                    let expected = start.unwrap_or_default();
                     decisions.push(RecoveryDecision::AttemptStale {
                         run_id: run_id.clone(),
                         attempt_id: row.id.clone(),
                         reason: format!(
-                            "pid {pid} is alive but started at {actual_start}, not at {start}: \
+                            "pid {pid} is alive but started at {actual_start}, not at {expected}: \
                              it is a different process"
+                        ),
+                    });
+                }
+                Liveness::Unidentified { actual_start } => {
+                    // A pid, and nothing to check it against. §4.7 step 3 asks
+                    // "alive **and** start-time matches?"; the second half has
+                    // no answer here, and an unanswerable question is not
+                    // answered in the affirmative — adopting a stranger's
+                    // process is worse than adopting nothing.
+                    //
+                    // The live process is **left alone**. Terminating it would
+                    // be the same unproven claim of ownership as adopting it,
+                    // acted on with a `SIGKILL`; the `TerminatedLiveAgent` path
+                    // above is only safe because the identity matched.
+                    let stale = attempt.starting().active(pid, start).stale();
+                    store.record_attempt_terminal(fence, &stale, now_ms)?;
+                    let reconciled = stale.reconciled();
+                    store.record_attempt_reconciled(fence, &reconciled, now_ms)?;
+                    decisions.push(RecoveryDecision::AttemptStale {
+                        run_id: run_id.clone(),
+                        attempt_id: row.id.clone(),
+                        reason: format!(
+                            "pid {pid} is alive and started at {actual_start}, but no start time \
+                             was recorded for the attempt: it cannot be shown to be ours, so it \
+                             was neither adopted nor killed"
                         ),
                     });
                 }
@@ -322,7 +349,7 @@ pub fn recover_one(
             // supervisor died between spawning and recording — and there is no
             // way to tell which. `STALE` is the only honest answer, and the
             // repository is the evidence that decides what to do next.
-            _ => {
+            None => {
                 let stale = attempt.starting().spawn_failed(
                     "no pid was recorded; the supervisor died before or during the spawn",
                 );
@@ -484,6 +511,19 @@ pub fn recover_one(
     Ok(Some(reconciliation))
 }
 
+/// The process identity a row actually carries — §4.7 step 3's second half.
+///
+/// `NULL` is an absent identity, and so is `0`: no process began at the Unix
+/// epoch, so a `0` in that column is not a start time but the residue of a build
+/// that collapsed "the start time could not be read" into a sentinel. Rows like
+/// that are already in databases, and `probe` used to read `0` as "skip the
+/// check", so passing the column through unfiltered is the fail-open itself.
+/// Both sites that reconstruct an attempt from its row go through here, so
+/// neither can drift into believing one.
+fn recorded_start_time(row: &conductor_store::AttemptRow) -> Option<i64> {
+    row.pid_start_time.filter(|start| *start > 0)
+}
+
 /// Attach a workspace that exists on disk but was never recorded.
 ///
 /// The crash window between `git clone` returning and `attach_workspace`
@@ -551,12 +591,18 @@ fn rebuild_terminal(
     run_id: &RunId,
 ) -> Option<conductor_core::attempt::TerminalPhase> {
     let starting = Attempt::create(row.id.clone(), run_id.clone(), row.ordinal).starting();
-    let (Some(pid), Some(start)) = (row.pid, row.pid_start_time) else {
+    let Some(pid) = row.pid else {
         // No process was ever recorded, so there is nothing to classify beyond
         // "we do not know".
         return Some(starting.spawn_failed("no process identity was recorded"));
     };
-    let active = starting.active(pid, start);
+    // A pid with no readable start time is still a process that ran, and this
+    // row already carries the outcome somebody observed. Rebuilding it as
+    // `spawn_failed` would rewrite that outcome — the one thing this function's
+    // caller documents it must not do — on the strength of a missing identity
+    // that says nothing about how the attempt ended. The absence is carried
+    // through instead, exactly as the probe path above carries it.
+    let active = starting.active(pid, recorded_start_time(row));
     Some(match row.state {
         AttemptState::Exited => active.exited(row.exit_code.unwrap_or(0)),
         AttemptState::Crashed => match (row.signal, row.exit_code) {

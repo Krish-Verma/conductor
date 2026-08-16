@@ -15,8 +15,10 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use conductor_core::{RunState, TaskState};
+use conductor_core::completion::Criterion;
+use conductor_core::{PlanVersionId, RunState, TaskId, TaskState};
 use conductor_git::Verdict;
+use conductor_run::WorkerError;
 use conductor_run::vertical::{VerticalConfig, VerticalOutcome, run_task};
 
 use common::agent::{fake_agent_binary, scenario_file, warm_the_binary, write_scenario};
@@ -24,6 +26,19 @@ use common::vertical::{FAILING_PROFILE, RUN, RUN_BRANCH, TASK, World, commits_ab
 
 /// Run the vertical over a catalogued scenario.
 fn run_scenario(world: &World, scenario: &str) -> conductor_run::vertical::Vertical {
+    try_scenario(world, scenario).expect("the vertical must not error")
+}
+
+/// The same, without insisting it succeeded.
+///
+/// Separate from [`run_scenario`] because a refusal *before the claim* — an
+/// unmet dependency, an ineligible host — is reported as an error rather than
+/// as a [`VerticalOutcome`]: there is no attempt to describe, so there is no
+/// `Vertical` to return. A test about that refusal has to be able to see it.
+fn try_scenario(
+    world: &World,
+    scenario: &str,
+) -> Result<conductor_run::vertical::Vertical, WorkerError> {
     warm_the_binary();
     let path = scenario_file(&world.root(), scenario);
     drive(world, &path)
@@ -33,10 +48,10 @@ fn run_scenario(world: &World, scenario: &str) -> conductor_run::vertical::Verti
 fn run_json(world: &World, json: &str) -> conductor_run::vertical::Vertical {
     warm_the_binary();
     let path = write_scenario(&world.root(), json);
-    drive(world, &path)
+    drive(world, &path).expect("the vertical must not error")
 }
 
-fn drive(world: &World, scenario: &Path) -> conductor_run::vertical::Vertical {
+fn drive(world: &World, scenario: &Path) -> Result<conductor_run::vertical::Vertical, WorkerError> {
     let adapter =
         conductor_agent::fake::FakeAgent::new(fake_agent_binary(), scenario.to_path_buf())
             .with_max_lifetime_ms(20_000);
@@ -62,13 +77,78 @@ fn drive(world: &World, scenario: &Path) -> conductor_run::vertical::Vertical {
         startup_grace: Duration::from_secs(30),
         sensitive: conductor_git::SensitivePatterns::default(),
         agent_env_extra: Default::default(),
+        // The fake agent authenticates against nothing.
+        credential_home: None,
         // No `execution_requirements` on these fixtures' tasks, so §4.2's
         // gate compares an empty vector and proceeds without a probe.
         probe_key: conductor_run::containment::cache::ProbeKey::new(
             "fake", "test", "none", "n/a", "unprobed",
         ),
     };
-    run_task(&mut store, &adapter, &config, &mut ()).expect("the vertical must not error")
+    run_task(&mut store, &adapter, &config, &mut ())
+}
+
+/// Write the fixture task's `acceptance_criteria` column, in the exact bytes
+/// `plan::materialize::canonical_criteria` produces.
+///
+/// The payload is written directly rather than by running the materializer,
+/// because what is under test here is the **completion gate's** reading of the
+/// column, not the materializer's writing of it — `plan_materialize.rs` already
+/// pins the bytes, and coupling these tests to a whole plan document would make
+/// a failure here ambiguous between the two.
+fn declares_criteria(world: &World, json: &str) {
+    world
+        .store()
+        .set_acceptance_criteria(&TaskId::new(TASK).expect("task id"), Some(json))
+        .expect("write acceptance_criteria");
+}
+
+/// Write the fixture task's `depends_on` column, in the materializer's bytes.
+fn declares_dependency(world: &World, json: &str) {
+    world
+        .store()
+        .set_depends_on(&TaskId::new(TASK).expect("task id"), Some(json))
+        .expect("write depends_on");
+}
+
+/// Add a second task to the store, so a dependency has something to point at.
+fn seed_task(world: &World, id: &str) {
+    world
+        .store()
+        .create_task(
+            &conductor_store::NewTask {
+                id: TaskId::new(id).expect("task id"),
+                plan_version_id: "pv-1".to_string(),
+                slice_id: "S11".to_string(),
+                scope_globs: vec!["src/**".to_string()],
+                verification_profile: "verification.yaml".to_string(),
+                attempt_budget: 3,
+            },
+            0,
+        )
+        .expect("create task");
+}
+
+/// Walk a task to `COMPLETE` along §5.2's edges.
+///
+/// One `set_task_state` per edge rather than a single jump, because the store
+/// enforces §5.2's legality table — `PENDING → COMPLETE` is refused, and
+/// rightly. A fixture that could shortcut the machine would be testing a task
+/// state the product cannot produce.
+fn complete_task(world: &World, id: &str) {
+    let task_id = TaskId::new(id).expect("task id");
+    let mut store = world.store();
+    for state in [
+        TaskState::Ready,
+        TaskState::Running,
+        TaskState::Reconciling,
+        TaskState::Verifying,
+        TaskState::Complete,
+    ] {
+        store
+            .set_task_state(&task_id, state)
+            .unwrap_or_else(|e| panic!("{id} → {state}: {e}"));
+    }
 }
 
 /// Every `run.state` the event journal recorded, in order.
@@ -212,10 +292,17 @@ fn the_user_repository_keeps_its_own_branch_and_checkout() {
 #[test]
 fn the_commit_carries_only_the_trailers_that_have_a_real_source() {
     // §3.4's five trailers exist so the audit trail "survives total local state
-    // loss and travels with the repository". Two of the five have no source at
-    // S5 — plan versioning is S11, approvals are S8 — and a fabricated hash is
-    // **worse** than an absent trailer, because a reader recovering from total
-    // loss cannot tell a made-up value from a real one.
+    // loss and travels with the repository". A fabricated hash is **worse**
+    // than an absent trailer, because a reader recovering from total loss
+    // cannot tell a made-up value from a real one.
+    //
+    // **Changed at S11.** This test used to assert `Conductor-Plan` was absent,
+    // on the S5-era ground that "plan versioning is S11; emitting a plan
+    // trailer now would fabricate one". S11 built the plan ledger, so the
+    // trailer now has exactly the real source the old assertion was waiting
+    // for: `task.plan_version_id` → `plan_version.version` and
+    // `.content_hash`. Nothing about the *rule* changed — only whether this
+    // trailer can satisfy it.
     let world = World::new();
     let result = run_scenario(&world, "success");
     let VerticalOutcome::Complete { commit, .. } = &result.outcome else {
@@ -232,21 +319,59 @@ fn the_commit_carries_only_the_trailers_that_have_a_real_source() {
         trailers.contains(&format!("Conductor-Run: {RUN}")),
         "{trailers}"
     );
+    assert!(trailers.contains("Conductor-Plan: v1@"), "{trailers}");
     assert!(trailers.contains("Conductor-Policy: blake3:"), "{trailers}");
     assert!(
         trailers.contains("Conductor-Verification: blake3:"),
         "{trailers}"
     );
 
-    // Deferred, and therefore absent rather than invented.
-    assert!(
-        !trailers.contains("Conductor-Plan"),
-        "plan versioning is S11; emitting a plan trailer now would fabricate one: {trailers}"
-    );
+    // Still deferred, and therefore absent rather than invented. S8 built the
+    // grant machinery; what has no source yet is the *binding* value §3.4
+    // shows — `AG-0019 binding=blake3:7d31…` — on a commit whose run consumed
+    // no grant at all, which this one did not.
     assert!(
         !trailers.contains("Conductor-Approval"),
-        "approvals are S8; emitting an approval trailer now would fabricate one: {trailers}"
+        "this run consumed no grant; an approval trailer here would name one \
+         that does not exist: {trailers}"
     );
+}
+
+#[test]
+fn the_plan_trailer_names_the_version_and_content_hash_of_the_plan_the_task_came_from() {
+    // §3.4's format is `Conductor-Plan: v3@blake3:9ac2…`, and §3.5 makes it
+    // load-bearing: recovery from total local loss reconstructs "which run,
+    // plan version, policy snapshot and approval produced every
+    // Conductor-authored commit" from the trailers alone. So the value has to
+    // be the two facts a reader needs to find the document again — which
+    // version, and what it hashed to — read from the row the task was
+    // materialized under rather than restated from the row's id.
+    let world = World::new();
+    let result = run_scenario(&world, "success");
+    let VerticalOutcome::Complete { commit, .. } = &result.outcome else {
+        panic!("expected COMPLETE, got {:?}", result.outcome);
+    };
+
+    let plan = world
+        .store()
+        .plan_version(&PlanVersionId::new("pv-1").expect("plan version id"))
+        .expect("query")
+        .expect("the fixture registers pv-1");
+    let value = git_out(
+        &world.workspace(),
+        &[
+            "log",
+            "-1",
+            "--format=%(trailers:key=Conductor-Plan,valueonly)",
+            &commit.sha,
+        ],
+    );
+
+    assert_eq!(
+        value.trim(),
+        format!("v{}@{}", plan.version, plan.content_hash)
+    );
+    assert_eq!(value.trim(), "v1@blake3:plan", "§3.4's literal shape");
 }
 
 #[test]
@@ -494,4 +619,234 @@ fn a_failing_check_stops_the_run_short_of_complete_and_commits_nothing() {
             .is_empty(),
         "a refused run must not have opened an effect"
     );
+}
+
+// ---------------------------------------------------------------------------
+// §4.5's criterion 5 — every acceptance criterion binds to ≥1 *passing* check.
+// ---------------------------------------------------------------------------
+
+/// One criterion, bound to the passing profile's required check.
+const BOUND_CRITERION: &str = r#"[{"id":"AC-1","manual":false,"statement":"The unit tests prove it.","verified_by":["unit-tests"]}]"#;
+
+#[test]
+fn a_criterion_bound_to_a_check_that_failed_refuses_completion_in_its_own_name() {
+    // §4.5 criterion 5 is "every acceptance criterion binds to ≥1 **passing**
+    // check". The word doing the work is *passing*: a criterion bound to a
+    // check that ran and failed is bound to nothing that proves it.
+    //
+    // The assertion is on the criterion, not merely on the outcome. A failing
+    // required check already refuses under criterion 1, so "the task did not
+    // complete" would be true even if criterion 5 had never looked — which is
+    // exactly the state this task exists to end.
+    let world = World::new().with_profile(FAILING_PROFILE);
+    declares_criteria(&world, BOUND_CRITERION);
+
+    let result = run_scenario(&world, "success");
+
+    assert_ne!(world.task_state(), TaskState::Complete);
+    let acceptance = result
+        .refusals
+        .iter()
+        .find(|r| r.criterion == Criterion::AcceptanceBindings)
+        .unwrap_or_else(|| {
+            panic!(
+                "criterion 5 must refuse in its own name: {:?}",
+                result.refusals
+            )
+        });
+    assert!(
+        acceptance.detail.contains("AC-1") && acceptance.detail.contains("unit-tests"),
+        "the refusal must name the criterion and the check a human has to look \
+         at: {acceptance:?}"
+    );
+    assert_eq!(
+        commits_above(&world.workspace(), RUN_BRANCH, &world.base_commit),
+        0
+    );
+}
+
+#[test]
+fn a_manual_criterion_cannot_be_satisfied_mechanically_even_by_a_passing_check() {
+    // §3.7: "Escape hatch: mark it `manual: true`, which forces a review
+    // boundary." Bound here to a check that *does* pass, which is the strongest
+    // form of the invariant: `manual` is not a statement about how much
+    // evidence there is, it is a statement that no amount of mechanical
+    // evidence settles the question.
+    let world = World::new();
+    declares_criteria(
+        &world,
+        r#"[{"id":"AC-2","manual":true,"statement":"A human has read the migration.","verified_by":["unit-tests"]}]"#,
+    );
+
+    let result = run_scenario(&world, "success");
+
+    // Everything mechanical went right — that is the point.
+    assert_eq!(result.attempt.verdict, Verdict::CleanComplete);
+    assert!(
+        result
+            .verification
+            .as_ref()
+            .expect("the run verified")
+            .all_passed(),
+        "every check passed; only the manual criterion stands"
+    );
+
+    assert_ne!(world.task_state(), TaskState::Complete);
+    assert!(
+        result
+            .refusals
+            .iter()
+            .any(|r| r.criterion == Criterion::AcceptanceBindings && r.detail.contains("AC-2")),
+        "{:?}",
+        result.refusals
+    );
+    assert_eq!(
+        commits_above(&world.workspace(), RUN_BRANCH, &world.base_commit),
+        0
+    );
+}
+
+#[test]
+fn a_criterion_bound_to_a_passing_check_reaches_complete_and_is_no_longer_deferred() {
+    // **Positive control.** A gate that refused everything would satisfy both
+    // tests above and be useless, so the same machinery has to let a task whose
+    // criteria are genuinely satisfied through.
+    //
+    // The second assertion is what makes this more than a repeat of the happy
+    // path: criterion 5 must be *evaluated* rather than deferred. Before S11
+    // this task completed too — with `AcceptanceBindings` on the deferred list,
+    // meaning nobody had looked.
+    let world = World::new();
+    declares_criteria(&world, BOUND_CRITERION);
+
+    let result = run_scenario(&world, "success");
+
+    let VerticalOutcome::Complete { deferred, .. } = &result.outcome else {
+        panic!("expected COMPLETE, got {:?}", result.outcome);
+    };
+    assert_eq!(world.task_state(), TaskState::Complete);
+    assert!(
+        !deferred.contains(&Criterion::AcceptanceBindings),
+        "criterion 5 was answered, not deferred: {deferred:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §5.2's `PENDING ──deps met──► READY`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_task_whose_dependency_has_not_completed_is_not_claimed() {
+    // §5.2 draws exactly one edge out of `PENDING`, and it is conditional.
+    // Before S11 there was no dependency graph, so "deps met" was vacuously
+    // true; the materializer writes `task.depends_on`, so it is now a question
+    // with an answer.
+    let world = World::new();
+    seed_task(&world, "T-0011");
+    declares_dependency(&world, r#"["T-0011"]"#);
+
+    let error = try_scenario(&world, "success").expect_err("the dependency is PENDING");
+
+    assert!(
+        error.to_string().contains("T-0011"),
+        "the refusal must name the dependency a human has to chase: {error}"
+    );
+    // Still `PENDING`, deliberately. `BLOCKED` would be wrong: §5.2's fifth
+    // correction gives it only `→ CANCELLED` and `→ SUPERSEDED`, so a task
+    // blocked for waiting could never start once its dependency finished.
+    assert_eq!(world.task_state(), TaskState::Pending);
+    // Nothing was spent on it either: the gate is on `PENDING → READY`, which
+    // is upstream of the claim, so there is no workspace, no agent and no ref.
+    assert!(
+        !world.workspace().exists(),
+        "a task that may not be claimed must not have been cloned for"
+    );
+    assert_eq!(
+        ref_updates(&world.source, &format!("refs/heads/{RUN_BRANCH}")),
+        0
+    );
+}
+
+#[test]
+fn a_task_whose_dependency_has_completed_is_claimed() {
+    // **Positive control** for the gate above: a dependency gate that refused
+    // unconditionally would pass that test and stall every plan with an edge in
+    // it. `COMPLETE` is the state §5.2 makes terminal, so "met" is a fact that
+    // cannot later become false.
+    let world = World::new();
+    seed_task(&world, "T-0011");
+    complete_task(&world, "T-0011");
+    declares_dependency(&world, r#"["T-0011"]"#);
+
+    let result = run_scenario(&world, "success");
+
+    assert!(result.is_complete(), "{:?}", result.outcome);
+    assert_eq!(world.task_state(), TaskState::Complete);
+}
+
+// ---------------------------------------------------------------------------
+// Acceptance row 29 — `.conductor/` mutated on a run branch.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn row_29_a_conductor_change_on_a_run_branch_is_rejected_and_never_fetched() {
+    // Row 29: "`.conductor/` mutated on a run branch | agent writes `APPROVED` |
+    // change rejected at reconciliation | **never fetched**; finding | no |
+    // **yes** | `AWAITING_REVIEW`".
+    //
+    // §3.3 control 1 calls this rejection *unconditional*, so this test asserts
+    // all three layers that make it so, not just the verdict: the verdict, the
+    // CRITICAL finding (§4.5's criterion 4 blocks COMPLETE on one), and the ref
+    // in the *registered* repository never moving.
+    let world = World::new();
+    let result = run_json(
+        &world,
+        r#"{"id":"forge-approval","steps":[
+             {"step":"emit","kind":"agent.started","detail":"forging"},
+             {"step":"write_file","path":"src/added.rs","contents":"pub fn added() {}\n"},
+             {"step":"write_file","path":".conductor/plans/v1/APPROVED",
+              "contents":"content_hash: blake3:0000\napprover: not-a-human\n"},
+             {"step":"exit","code":0}]}"#,
+    );
+
+    assert_eq!(result.attempt.verdict, Verdict::GovernanceViolation);
+    assert_eq!(world.run_state(), RunState::AwaitingReview);
+    assert_eq!(world.task_state(), TaskState::AwaitingReview);
+
+    // Layer 2: a CRITICAL finding naming the path. §4.8's findings never
+    // auto-resolve, so this alone keeps the run off COMPLETE.
+    let findings = world
+        .store()
+        .findings_for_run(&conductor_core::RunId::new(RUN).expect("id"))
+        .expect("findings");
+    let governance = findings
+        .iter()
+        .find(|f| f.kind == "GOVERNANCEPATH")
+        .expect("row 29 requires the finding");
+    assert_eq!(
+        governance.severity, "CRITICAL",
+        "§4.5 criterion 4 only blocks on a blocking severity: {governance:?}"
+    );
+    assert!(
+        governance
+            .evidence_ref
+            .contains(".conductor/plans/v1/APPROVED"),
+        "the finding must name the forged path: {governance:?}"
+    );
+    assert!(
+        governance.resolution.is_none(),
+        "§4.8: findings never auto-resolve"
+    );
+
+    // Layer 3: "Conductor never fetches such a change." The registered
+    // repository's ref must not have moved.
+    assert_eq!(
+        ref_updates(&world.source, &format!("refs/heads/{RUN_BRANCH}")),
+        0,
+        "the run branch reached the registered repository"
+    );
+
+    // And it never spent a check on a tree it had already rejected.
+    assert!(result.verification.is_none());
+    assert!(!state_history(&world).iter().any(|s| s == "VERIFYING"));
 }
