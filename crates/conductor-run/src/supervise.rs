@@ -427,8 +427,9 @@ impl SpawnedAgent {
                         first_output_at.get_or_insert_with(Instant::now);
                         last_activity = Instant::now();
                         match adapter.parse_event(&line) {
-                            Ok(Some(event)) => events.push(event),
-                            Ok(None) => {}
+                            // One line can carry several events — a Codex
+                            // `file_change` item holds an array of changes.
+                            Ok(parsed) => events.extend(parsed),
                             // A malformed line is evidence, not a reason to stop
                             // reading. Acceptance: "malformed JSONL".
                             Err(error) => parse_errors.push(error.to_string()),
@@ -661,8 +662,7 @@ impl SpawnedAgent {
                 Ok(StreamMessage::Line(line)) => {
                     first_output_at.get_or_insert_with(Instant::now);
                     match adapter.parse_event(&line) {
-                        Ok(Some(event)) => events.push(event),
-                        Ok(None) => {}
+                        Ok(parsed) => events.extend(parsed),
                         Err(error) => parse_errors.push(error.to_string()),
                     }
                     stdout_lines.push(line);

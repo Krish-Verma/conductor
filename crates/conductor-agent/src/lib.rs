@@ -15,6 +15,7 @@
 //! change fields between patch releases; a strict parser turns a cosmetic
 //! upstream change into a failed run.
 
+pub mod codex;
 pub mod error;
 pub mod event;
 pub mod fake;
@@ -117,13 +118,33 @@ pub trait AgentAdapter {
     /// Build the command. **Does not spawn.**
     fn command(&self, input: &StartInput) -> AgentResult<AgentCommand>;
 
-    /// Translate one line of the agent's stdout.
+    /// Translate one line of the agent's stdout into **zero or more** events.
     ///
-    /// `Ok(None)` means "nothing Conductor models" — a blank line, or an event
-    /// kind this binary has never heard of. `Err` means the line was not JSON at
-    /// all, which the supervisor records as a finding without stopping the
-    /// stream.
-    fn parse_event(&self, line: &str) -> AgentResult<Option<AgentEvent>>;
+    /// An empty vector means "nothing Conductor models" — a blank line, or an
+    /// event kind this binary has never heard of. `Err` means the line was not
+    /// JSON at all, which the supervisor records as a finding without stopping
+    /// the stream.
+    ///
+    /// # Why a `Vec` and not an `Option` (widened at S10)
+    ///
+    /// The signature was `Option<AgentEvent>` — one line, at most one event —
+    /// until the first real adapter met a line that carries several. Codex's
+    /// `file_change` item holds an **array** of changes, so an `Option` could
+    /// report the first path and silently drop the rest.
+    ///
+    /// S10's own instruction is what settles it: *"If any scenario needs
+    /// adapter-specific handling, that is a design smell to fix in the
+    /// interface, not the adapter."* Making the Codex adapter pick a
+    /// representative change, or flatten several into one, would have been the
+    /// adapter absorbing a shape the interface refused to express — and the
+    /// event stream would have understated what the agent did, on every
+    /// multi-file edit, forever.
+    ///
+    /// Nothing about correctness depended on it: §4.8 reconciles against git,
+    /// not against this stream. That is precisely why it would never have been
+    /// caught by a failing test — which is the argument for fixing it now
+    /// rather than when a second adapter has been built on the assumption.
+    fn parse_event(&self, line: &str) -> AgentResult<Vec<AgentEvent>>;
 
     /// Find the structured report, if the agent produced one.
     ///

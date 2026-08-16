@@ -94,6 +94,20 @@ const CENSUS: &[(&str, Facing, &str)] = &[
         "the S5 vertical as a separate process — Conductor itself",
     ),
     (
+        "crates/conductor-agent/src/bin/conductor-s10-codex-replay.rs",
+        Facing::Workspace,
+        "S10's recorded Codex. It is spawned exactly where `codex exec` would \
+         be — the agent's position, with the agent's containment — so it lives \
+         in the crate that *cannot* link the runtime, beside the fake agent, \
+         rather than merely promising not to",
+    ),
+    (
+        "crates/conductor-run/src/bin/conductor-s10-codex-worker.rs",
+        Facing::Conductor,
+        "S3's worker with the Codex adapter substituted: it holds the lease and \
+         drives the agent, so it is Conductor and not the thing being driven",
+    ),
+    (
         "crates/conductor-run/src/bin/conductor-s8-approval-victim.rs",
         Facing::Conductor,
         "S8's kill-restart cycle. It grants and consumes approvals on purpose, \

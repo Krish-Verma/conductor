@@ -67,6 +67,13 @@ pub struct AttemptRow {
     pub exit_code: Option<i32>,
     /// The fatal signal, when there was one.
     pub signal: Option<i32>,
+    /// The agent session this attempt belongs to, when there is one.
+    ///
+    /// Either the session Conductor assigned before the run, or — for an
+    /// adapter whose identity arrives on the wire, which §6.2 says Codex is —
+    /// the one the agent announced and the run path recorded. §4.6's repair
+    /// loop reads it to decide what a retry may resume.
+    pub agent_session_id: Option<String>,
 }
 
 /// One `attempt` row exactly as SQLite hands it over, before any domain parsing.
@@ -89,10 +96,12 @@ struct RawAttempt {
     ended_at: Option<i64>,
     exit_code: Option<i32>,
     signal: Option<i32>,
+    agent_session_id: Option<String>,
 }
 
 const SELECT_COLUMNS: &str = "id, run_id, ordinal, kind, adapter, launcher, state, outcome, \
-                              pid, pid_start_time, started_at, ended_at, exit_code, signal";
+                              pid, pid_start_time, started_at, ended_at, exit_code, signal, \
+                              agent_session_id";
 
 fn read_row(row: &Row<'_>) -> rusqlite::Result<RawAttempt> {
     Ok(RawAttempt {
@@ -110,6 +119,47 @@ fn read_row(row: &Row<'_>) -> rusqlite::Result<RawAttempt> {
         ended_at: row.get(11)?,
         exit_code: row.get(12)?,
         signal: row.get(13)?,
+        agent_session_id: row.get(14)?,
+    })
+}
+
+/// Record the session an agent announced for itself — S10.
+///
+/// §6.2: *"Session identity arrives in `thread.started`, so it cannot be
+/// pre-assigned"*. For such an adapter this is the **only** way
+/// `attempt.agent_session_id` is ever populated, and §4.6's
+/// `previous_session` reads that column to decide what a retry may resume — so
+/// without this, `resume` is unreachable for every adapter of that kind.
+///
+/// **The announcement wins.** If Conductor assigned a session and the agent
+/// announced a different one, the announced id is the session that actually
+/// exists — the assignment was a request, and only the agent knows what it
+/// created. Recording the request over the reality would send a resume at a
+/// session id no agent ever had.
+///
+/// **It never clears**, and not because of a `COALESCE`: an earlier version had
+/// one, and a mutation that removed it failed no test — because the caller only
+/// invokes this when there *is* an announcement, so the clearing case is
+/// unreachable by construction. A defence whose removal breaks nothing is a
+/// defence against nothing, and leaving it in would have left a doc comment
+/// claiming a guarantee the code was not providing.
+///
+/// Fenced like every other attempt write: a worker that lost its lease does not
+/// get to relabel the successor's attempt.
+pub fn record_agent_session(
+    conn: &mut Connection,
+    fence: &Fence,
+    attempt_id: &AttemptId,
+    session_id: &str,
+) -> StoreResult<()> {
+    with_immediate(conn, |tx| {
+        check_fence(tx, fence)?;
+        tx.execute(
+            "UPDATE attempt SET agent_session_id = ?2
+              WHERE id = ?1",
+            params![attempt_id.as_str(), session_id],
+        )?;
+        Ok(())
     })
 }
 
@@ -133,6 +183,7 @@ fn to_attempt_row(raw: RawAttempt) -> StoreResult<AttemptRow> {
         ended_at: raw.ended_at,
         exit_code: raw.exit_code,
         signal: raw.signal,
+        agent_session_id: raw.agent_session_id,
     })
 }
 

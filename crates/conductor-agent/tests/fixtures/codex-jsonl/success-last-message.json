@@ -1,0 +1,1 @@
+{"claim":"COMPLETE","files_touched":["/workspace/lib.rs"],"summary":"Added `pub fn double(value: u32) -> u32 { value * 2 }` to `lib.rs` and made no other changes."}

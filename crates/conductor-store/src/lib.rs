@@ -21,7 +21,8 @@ use std::path::{Path, PathBuf};
 
 use conductor_core::effect::{OperationId, Precondition, SideEffectKind, SideEffectState};
 use conductor_core::{
-    EventKind, Fence, ReconciledRoute, RunId, RunState, TaskId, TaskState, TerminalAttempt,
+    AttemptId, EventKind, Fence, ReconciledRoute, RunId, RunState, TaskId, TaskState,
+    TerminalAttempt,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -429,6 +430,19 @@ impl Store {
     }
 
     /// Every attempt of one run, oldest first.
+    /// Record the session an agent announced for itself — S10.
+    ///
+    /// Never clears an assigned session; see
+    /// [`attempt::record_agent_session`].
+    pub fn record_agent_session(
+        &mut self,
+        fence: &Fence,
+        attempt_id: &AttemptId,
+        session_id: &str,
+    ) -> StoreResult<()> {
+        attempt::record_agent_session(&mut self.conn, fence, attempt_id, session_id)
+    }
+
     pub fn attempts_for_run(&self, run_id: &RunId) -> StoreResult<Vec<AttemptRow>> {
         attempt::attempts_for_run(&self.conn, run_id)
     }

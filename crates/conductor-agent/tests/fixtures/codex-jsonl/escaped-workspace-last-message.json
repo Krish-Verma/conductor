@@ -1,0 +1,1 @@
+{"claim":"COMPLETE","files_touched":["/workspace/lib.rs","/workspace/src/deep/mod.rs","/workspace-other/lib.rs","/Users/kv/.ssh/config","already/relative.rs"],"summary":"Edited lib.rs and src/deep/mod.rs, read a sibling checkout, and touched a file outside the workspace."}

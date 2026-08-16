@@ -270,7 +270,7 @@ impl AgentAdapter for HostileAgent {
         })
     }
 
-    fn parse_event(&self, line: &str) -> AgentResult<Option<conductor_agent::AgentEvent>> {
+    fn parse_event(&self, line: &str) -> AgentResult<Vec<conductor_agent::AgentEvent>> {
         conductor_agent::fake::FakeAgent::new(self.binary.clone(), PathBuf::new()).parse_event(line)
     }
 

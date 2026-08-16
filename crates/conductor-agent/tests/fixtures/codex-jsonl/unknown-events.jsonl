@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"01a007b9-325f-78e0-9f17-d8b2561bf576","rollout_path":"/nonexistent/rollout.jsonl"}
+{"type":"turn.context","cwd":"/workspace","model":"a-model-that-did-not-exist-at-s10","effort":"high"}
+{"type":"item.completed","item":{"id":"item_0","type":"reasoning","summary":"a kind Conductor does not model"}}
+{"type":"thread.compaction.started","reason":"context_pressure","tokens_reclaimed":41230}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'ls'","aggregated_output":"","exit_code":null,"status":"in_progress","sandbox_policy":{"mode":"workspace-write"},"duration_ms":12}}
+{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0,"cost_usd":0.0102}}

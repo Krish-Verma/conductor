@@ -73,6 +73,8 @@ pub const HOME_DIR: &str = ".conductor-home";
 pub const TMP_DIR: &str = ".conductor-tmp";
 /// The askpass program, relative to the per-run `HOME`.
 pub const ASKPASS_FILE: &str = "askpass-always-fails";
+/// The per-run credential home, relative to the workspace.
+pub const AGENT_HOME_DIR: &str = ".conductor-agent-home";
 
 /// A program that always exits non-zero and prints nothing.
 ///
@@ -206,7 +208,7 @@ fn hide_from_git(workspace: &Path) -> io::Result<()> {
         contents.push('\n');
     }
     let mut added = false;
-    for name in [HOME_DIR, TMP_DIR] {
+    for name in [HOME_DIR, TMP_DIR, AGENT_HOME_DIR] {
         let line = format!("/{name}");
         // Idempotent: recovery re-enters this path, and appending the same two
         // lines on every attempt would grow the file without bound.
@@ -251,6 +253,91 @@ fn write_askpass(path: &Path) -> io::Result<()> {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o500))?;
     }
     Ok(())
+}
+
+/// Materialise a per-run credential directory for an adapter that needs one.
+///
+/// # Why a directory, when §4.9 says "the adapter's own auth **variable**"
+///
+/// Because for the first real adapter it is not a variable. S10 measured
+/// `~/.codex/auth.json` on this host: `auth_mode` is `"chatgpt"` and
+/// `OPENAI_API_KEY` is **null** — the credential is a refresh/access token pair
+/// in a *file*, and what Codex reads is `CODEX_HOME`, a directory pointer. The
+/// clause in §4.9 was written for the API-key case and does not cover it.
+///
+/// # Why not simply point the variable at the operator's real directory
+///
+/// Two reasons, and the second is the one that matters.
+///
+/// It would hand the agent read access to `config.toml`, every profile file,
+/// and the entire session history — none of which is a credential and all of
+/// which is the operator's.
+///
+/// And **the agent writes there**. A run pointed at the real `~/.codex` leaves
+/// session rollouts in the operator's home: outside the workspace, outside
+/// §4.8's reconciled surface, and outside the per-run `TMPDIR` audit. The
+/// containment story would have a hole shaped exactly like the credential that
+/// was supposed to be its foundation.
+///
+/// So the run gets its own directory, inside the workspace, containing **only**
+/// the files named — `0700`, with each file `0600`. It dies with the workspace,
+/// it is inside the audit surface, and it is excluded from git by [`prepare`]
+/// so a credential can never become a commit.
+///
+/// # Fails closed on a missing file
+///
+/// A credential that is not there is an error here, not an empty directory. An
+/// empty credential home fails deep inside the agent as an opaque `401`, at
+/// which point the reason — "the file you named does not exist" — is several
+/// layers away from the symptom.
+///
+/// The caller passes the returned path to the adapter by name, through
+/// `agent_env_extra`. Nothing here decides which variable: that is adapter
+/// knowledge, and the allowlist test will show it as an extra key rather than
+/// letting it in silently.
+pub fn materialize_credential_home(
+    workspace: &Path,
+    source: &Path,
+    files: &[&str],
+) -> io::Result<PathBuf> {
+    let home = workspace.join(AGENT_HOME_DIR);
+    std::fs::create_dir_all(&home)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700))?;
+    }
+
+    for name in files {
+        let from = source.join(name);
+        if !from.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "the adapter needs {} from {}, and it is not there; refusing to \
+                     launch with an empty credential home rather than failing as a \
+                     401 inside the agent",
+                    name,
+                    source.display()
+                ),
+            ));
+        }
+        let to = home.join(name);
+        // Remove first: `prepare` may have run before, and a `0600` file cannot
+        // be overwritten in place on a second attempt.
+        match std::fs::remove_file(&to) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        std::fs::copy(&from, &to)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    Ok(home)
 }
 
 #[cfg(test)]

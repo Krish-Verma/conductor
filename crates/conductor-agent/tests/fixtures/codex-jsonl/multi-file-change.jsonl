@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"01a007b9-multi"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_1","type":"file_change","changes":[{"path":"/workspace/src/a.rs","kind":"update"},{"path":"/workspace/src/b.rs","kind":"add"},{"path":"/workspace/src/gone.rs","kind":"delete"}],"status":"in_progress"}}
+{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0}}

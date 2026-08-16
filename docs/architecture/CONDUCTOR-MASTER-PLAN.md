@@ -391,7 +391,7 @@ Conductor-Verification: blake3:5b8e…
 - **Policy and verification are configuration.** YAML.
 - A **decision is an argument.** Small fixed metadata (`id`, `status`, `supersedes`, `date`) in schema-validated frontmatter; the value is prose a human reads and a packet quotes.
 
-**No generated duplicates.** Rendering plans to Markdown and committing both creates two representations that silently disagree the first time someone edits the wrong one. `conductor plan show` renders on demand, to stdout, never to a tracked file.
+**No generated duplicates.** Rendering plans to Markdown and committing both creates two representations that silently disagree the first time someone edits the wrong one. `conductor task show` renders on demand, to stdout, never to a tracked file. *(Corrected at S11: this said `conductor plan show`, which §7.1's 13 commands do not include — §7.1 folded plan rendering into `task show` and `status`.)*
 
 **Hash semantics, not bytes.** The plan hash is computed over parsed-and-canonically-reserialized content: keys sorted, LF endings, no trailing whitespace, no timestamps. Therefore reformatting does **not** invalidate approval; changing any field **does**. YAML comments are excluded from the hash and **must not carry meaning** — `plan validate` warns on comments over a threshold, because a long comment is usually load-bearing prose in the wrong place.
 
@@ -402,6 +402,37 @@ Conductor-Verification: blake3:5b8e…
 Duplicate IDs · dangling `verified_by` references · verification IDs absent from `verification.yaml` · forward dependencies · scope globs matching no path · **any acceptance criterion not bound to at least one check**.
 
 That last one matters most: an unbound criterion is the mechanism by which a task reaches `COMPLETE` on an agent's word. Escape hatch: mark it `manual: true`, which forces a review boundary.
+
+**Four clarifications forced by implementing this list at S11.**
+
+1. **"Forward dependencies" means declaration order, and it is kept.** It is a
+   strictly stronger rule than cycle detection, and the two are not
+   interchangeable: a plan can point forward and still be a perfectly executable
+   DAG, so a cycle checker accepts a file this rule refuses. Keeping the literal
+   reading is what makes acyclicity **structural** — a graph whose every edge
+   points backwards cannot contain a cycle — and it settles a question the
+   content hash would otherwise leave open: if declaration order is semantically
+   constrained then reordering tasks *is* a semantic change, and invalidating an
+   approval on reorder is correct rather than incidental. Cycle detection is
+   retained as defence in depth and to catch the one case that is not a forward
+   edge, a task depending on itself. **Every cycle necessarily contains a
+   forward edge**, so the two defects co-occur; that is not double-counting.
+2. **"Dangling `verified_by` references" and "verification IDs absent from
+   `verification.yaml`" are one rule, not two.** A `verified_by` entry has
+   exactly one possible referent — a check id — so the two phrases describe the
+   same check from two directions. Implemented once.
+3. **The check catalogue is an input to `validate`, not something it resolves.**
+   §5.1 makes `verification_profile` a per-task path while this section names a
+   single `verification.yaml`; until S11's persistence step settles that, the
+   validator takes the catalogue as a parameter and the caller assembles it. A
+   pure function that reached into the filesystem to resolve per-task profiles
+   would be deciding the question rather than deferring it.
+4. **A plan document cannot declare its own state.** `state:` is not a field of
+   `plan.yaml`: §3.3 gives an agent write access to `.conductor/`, so a document
+   that could say `APPROVED` would be self-approval. The state lives in the
+   store, and writing `state: APPROVED` into a plan file is inert *and* changes
+   the plan's content hash — which is what makes the tampering visible rather
+   than merely ineffective.
 
 ---
 
@@ -1220,7 +1251,7 @@ DRAFT ──validate──► VALIDATED ──request──► AWAITING_APPROVAL
 
 Dropped from the baseline: `IMPORTED` (indistinguishable from `DRAFT`) and terminal `REJECTED` (a rejected plan is a `DRAFT` again; a terminal reject state is a graveyard nobody queries).
 
-**Authority:** `APPROVED` only via a human at the control socket. **Evidence:** `content_hash` + validation report. **Invalid:** `DRAFT → APPROVED`; `APPROVED → *` except `SUPERSEDED`. **Restart:** re-hash on load; a mismatch on an `APPROVED` plan is a hard error requiring `conductor plan reapprove`.
+**Authority:** `APPROVED` only via a human at the control socket. **Evidence:** `content_hash` + validation report. **Invalid:** `DRAFT → APPROVED`; `APPROVED → *` except `SUPERSEDED`. **Restart:** re-hash on load; a mismatch on an `APPROVED` plan is a hard error, cleared by re-running `conductor plan approve <version>` on the changed document. *(Corrected at S11: §7.1's 13-command surface has no `plan reapprove`, so as written the hard-error state had no exit. `plan approve` is already human-only and socket-only, which is exactly the authority re-approval requires — a fourteenth command would add a second door to the same room.)*
 
 ### Task (12 states)
 
@@ -1371,8 +1402,31 @@ Verified against `codex exec --help`, codex-cli 0.142.0:
 | Structured report | `--output-schema <FILE>` + `-o/--output-last-message <FILE>` |
 | Resume | `codex exec resume <SESSION_ID>` / `--last` |
 | **OS sandbox** | `-s/--sandbox read-only\|workspace-write\|danger-full-access` |
-| Working root | cwd (`-C` requires `--permissions-profile`; use cwd instead) |
-| Hermeticity | `--ignore-user-config`, `--ignore-rules`, `--ephemeral` |
+| Working root | cwd **and** `-C/--cd <DIR>` *(corrected at S10)* |
+| Hermeticity | `--ignore-user-config`, `--ignore-rules` — **not `--ephemeral`** *(corrected at S10)* |
+
+**Three things S10 measured against codex-cli 0.142.0 that the table above did not say.**
+
+1. **`--output-schema` shapes *every* `agent_message`, not only the final one.**
+   The recorded run emits five, and the first four claim `PARTIAL` while the last
+   claims `COMPLETE`. An adapter that takes the first schema-shaped message as
+   "the report" reads a mid-run status as the outcome. The report is
+   `-o/--output-last-message`'s file, with the **last** `agent_message` as the
+   fallback.
+2. **`files_touched` carries absolute paths.** §4.8 reconciles in
+   workspace-relative paths, so an adapter that does not normalise makes every
+   successful run disagree with its own observation and reconcile as
+   `CONTRADICTED` — a false "the agent lied" on the happy path. A path genuinely
+   outside the workspace is left alone, because that is evidence.
+3. **`--ephemeral` is incompatible with `resume`**, which the same slice scopes:
+   it discards the session `resume` needs. Dropped; `--ignore-user-config` and
+   `--ignore-rules` carry hermeticity.
+
+**And one that is not about flags:** Codex blocks indefinitely reading `stdin`
+when `stdin` is not a TTY. Conductor is immune because `supervise::spawn` uses
+`Stdio::null()`, which was chosen for unrelated reasons — so the immunity is
+load-bearing and accidental, and is now recorded as a requirement rather than a
+coincidence.
 
 **Chosen first, for one dominant reason:** on a machine with no container runtime, `--sandbox workspace-write` is the only mechanism that actually prevents writes outside the workspace, denies network, and denies the control socket (M6, M9, M10). Building the first adapter against the agent that offers real containment means the enforcement layer is exercised from the beginning rather than stubbed. Its `--output-schema` also makes the report contract enforced by the agent runtime rather than validated afterward.
 

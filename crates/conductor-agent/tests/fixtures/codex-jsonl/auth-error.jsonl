@@ -1,0 +1,3 @@
+{"type":"thread.started","thread_id":"01a007b9-325f-78e0-9f17-d8b2561bf576"}
+{"type":"turn.started"}
+{"type":"error","message":"stream error: unexpected status 401 Unauthorized: {\"error\":{\"message\":\"Missing bearer or basic authentication in header\",\"type\":\"invalid_request_error\"}}"}

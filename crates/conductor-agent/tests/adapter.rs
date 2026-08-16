@@ -92,12 +92,16 @@ fn parse_event_reads_recorded_jsonl_with_no_process() {
     let started = adapter
         .parse_event(r#"{"kind":"agent.started","scenario":"success"}"#)
         .expect("parse")
+        .into_iter()
+        .next()
         .expect("an event");
     assert!(matches!(started, AgentEvent::Started { .. }));
 
     let file = adapter
         .parse_event(r#"{"kind":"file.written","path":"src/a.rs"}"#)
         .expect("parse")
+        .into_iter()
+        .next()
         .expect("an event");
     match file {
         AgentEvent::FileWritten { path } => assert_eq!(path, "src/a.rs"),
@@ -107,6 +111,8 @@ fn parse_event_reads_recorded_jsonl_with_no_process() {
     let checkpoint = adapter
         .parse_event(r#"{"kind":"checkpoint","name":"after-edits"}"#)
         .expect("parse")
+        .into_iter()
+        .next()
         .expect("an event");
     match checkpoint {
         AgentEvent::Checkpoint { name } => assert_eq!(name, "after-edits"),
@@ -125,6 +131,8 @@ fn an_unknown_field_never_makes_a_line_unparseable() {
             r#"{"kind":"file.written","path":"src/a.rs","tokens":42,"nested":{"x":[1,2]}}"#,
         )
         .expect("an unknown field must not be an error")
+        .into_iter()
+        .next()
         .expect("an event");
     assert!(matches!(event, AgentEvent::FileWritten { .. }));
 }
@@ -137,7 +145,7 @@ fn an_unknown_event_kind_is_ignored_not_an_error() {
         adapter()
             .parse_event(r#"{"kind":"thread.reasoning.delta","text":"…"}"#)
             .expect("must not error"),
-        None
+        Vec::new()
     );
 }
 
@@ -152,8 +160,8 @@ fn a_malformed_line_is_reported_but_does_not_stop_the_stream() {
     assert!(err.to_string().contains("could not be parsed"));
 
     // A blank line is not malformed, just empty.
-    assert_eq!(adapter().parse_event("").expect("blank"), None);
-    assert_eq!(adapter().parse_event("   ").expect("blank"), None);
+    assert_eq!(adapter().parse_event("").expect("blank"), Vec::new());
+    assert_eq!(adapter().parse_event("   ").expect("blank"), Vec::new());
 }
 
 #[test]
@@ -170,6 +178,8 @@ fn extract_report_prefers_the_report_file_and_tolerates_its_absence() {
     let report = adapter
         .extract_report(&outputs)
         .expect("extract")
+        .into_iter()
+        .next()
         .expect("a report");
     assert_eq!(report.claim, ReportClaim::Complete);
     assert_eq!(report.files_touched, vec!["src/a.rs".to_string()]);
@@ -209,6 +219,8 @@ fn a_report_with_extra_fields_still_parses() {
     let report = adapter()
         .extract_report(&outputs)
         .expect("extract")
+        .into_iter()
+        .next()
         .expect("a report");
     assert_eq!(report.claim, ReportClaim::Partial);
 }
@@ -229,6 +241,8 @@ fn a_report_delivered_on_stdout_is_found_when_there_is_no_file() {
     let report = adapter()
         .extract_report(&outputs)
         .expect("extract")
+        .into_iter()
+        .next()
         .expect("a report");
     assert_eq!(report.claim, ReportClaim::Complete);
 }

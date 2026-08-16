@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"01a007b9-325f-78e0-9f17-d8b2561bf576"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'cargo test'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_ex

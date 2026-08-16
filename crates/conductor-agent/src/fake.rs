@@ -112,10 +112,10 @@ impl AgentAdapter for FakeAgent {
         })
     }
 
-    fn parse_event(&self, line: &str) -> AgentResult<Option<AgentEvent>> {
+    fn parse_event(&self, line: &str) -> AgentResult<Vec<AgentEvent>> {
         let trimmed = line.trim();
         if trimmed.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
         let value: Value =
             serde_json::from_str(trimmed).map_err(|source| AgentError::MalformedLine {
@@ -133,9 +133,11 @@ impl AgentAdapter for FakeAgent {
             .unwrap_or_default()
             .to_string();
 
-        // An unmodelled kind is `Ok(None)`, never an error: this binary being
-        // older than the agent is the normal case, not a fault.
-        Ok(match kind {
+        // An unmodelled kind yields no events, never an error: this binary
+        // being older than the agent is the normal case, not a fault.
+        // One fake-agent line still maps to at most one event; the `Vec` is
+        // the interface's shape, not a claim that this adapter needs it.
+        Ok(Vec::from_iter(match kind {
             "agent.started" => Some(AgentEvent::Started {
                 session_id: value
                     .get("session_id")
@@ -177,7 +179,7 @@ impl AgentAdapter for FakeAgent {
                     .unwrap_or(false),
             }),
             _ => None,
-        })
+        }))
     }
 
     fn extract_report(&self, out: &RunOutputs) -> AgentResult<Option<AgentReport>> {
@@ -195,7 +197,12 @@ impl AgentAdapter for FakeAgent {
         }
 
         for line in out.stdout_lines.iter().rev() {
-            if let Some(AgentEvent::Report { report }) = self.parse_event(line).unwrap_or(None) {
+            if let Some(AgentEvent::Report { report }) = self
+                .parse_event(line)
+                .unwrap_or_default()
+                .into_iter()
+                .next()
+            {
                 return Ok(Some(report));
             }
         }

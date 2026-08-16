@@ -415,6 +415,25 @@ pub fn run_one_attempt(
         }
     };
 
+    // §6.2: "Session identity arrives in `thread.started`, so it cannot be
+    // pre-assigned." For such an adapter this is the **only** moment the
+    // session is knowable, and §4.6's `previous_session` reads
+    // `attempt.agent_session_id` to decide what a retry may resume — so
+    // without this, `resume` is unreachable for every adapter of that kind.
+    //
+    // Invisible until the first real adapter: the fake agent is handed its
+    // session by Conductor and hands the same one back, so every test before
+    // S10 asked a question that could not fail.
+    if let Some(announced) = supervised.events.iter().find_map(|event| match event {
+        conductor_agent::AgentEvent::Started {
+            session_id: Some(id),
+            ..
+        } => Some(id.clone()),
+        _ => None,
+    }) {
+        store.record_agent_session(fence, &attempt_id, &announced)?;
+    }
+
     for line in &supervised.parse_errors {
         findings.push(raise(
             store,

@@ -38,7 +38,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Command;
 
-use conductor_run::enforce::env::{AGENT_ENV_KEYS, RunEnvironment, prepare};
+use conductor_run::enforce::env::{
+    AGENT_ENV_KEYS, RunEnvironment, materialize_credential_home, prepare,
+};
 
 /// Variable names an operator plausibly has, with values that are obviously not
 /// real. §4.9 names exactly these classes: SSH agent, GitHub, cloud, database.
@@ -474,4 +476,156 @@ fn git_cannot_prompt_for_a_credential() {
         !stderr.contains("Username for") || stderr.contains("terminal prompts disabled"),
         "git tried to prompt for a username: {stderr}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// §4.9's "the adapter's own auth variable", when the credential is a directory
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_adapter_credential_home_carries_only_the_named_files() {
+    // S10 measured that §4.9's phrasing does not fit Codex: `~/.codex/auth.json`
+    // has `auth_mode: "chatgpt"` and a **null** `OPENAI_API_KEY` — the credential
+    // is a token pair in a *file*, and what Codex needs is `CODEX_HOME`, a
+    // directory pointer.
+    //
+    // Handing it the operator's real `~/.codex` is wrong in two directions.
+    // It gives the agent read access to `config.toml`, every profile, and the
+    // entire session history — and, worse, **Codex writes into `CODEX_HOME`**,
+    // so a contained run would leave session rollouts in the operator's home:
+    // outside the workspace, and outside §4.8's audit surface entirely.
+    //
+    // So Conductor materialises a per-run credential home containing only the
+    // files the adapter actually needs. Everything else in the source directory
+    // must not appear.
+    let ws = workspace("credhome");
+    prepare(ws.path()).expect("prepare");
+
+    // A synthetic credential directory. Never the operator's real one: a test
+    // that copied a live credential to prove copying works would have proved it
+    // by doing the thing it is guarding against.
+    let source = workspace("credsource");
+    std::fs::write(
+        source.path().join("auth.json"),
+        r#"{"token":"canary-not-real"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        source.path().join("config.toml"),
+        "model = \"secret-preference\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(source.path().join("sessions")).unwrap();
+    std::fs::write(
+        source.path().join("sessions").join("rollout.jsonl"),
+        "{\"prior\":\"conversation\"}\n",
+    )
+    .unwrap();
+
+    let home =
+        materialize_credential_home(ws.path(), source.path(), &["auth.json"]).expect("materialize");
+
+    assert!(
+        home.join("auth.json").is_file(),
+        "the credential was not copied"
+    );
+    assert!(
+        !home.join("config.toml").exists(),
+        "the operator's config followed the credential into the run"
+    );
+    assert!(
+        !home.join("sessions").exists(),
+        "the operator's session history followed the credential into the run"
+    );
+    assert!(
+        home.starts_with(ws.path()),
+        "the credential home must be inside the workspace, so it dies with the \
+         run and is inside the audit surface: {}",
+        home.display()
+    );
+}
+
+#[test]
+fn the_credential_home_is_owner_only_and_invisible_to_git() {
+    let ws = workspace("credperms");
+    // A git repository, so the exclusion can be observed rather than assumed.
+    for args in [
+        vec!["init", "--quiet", "-b", "main"],
+        vec!["config", "user.email", "t@example.invalid"],
+        vec!["config", "user.name", "t"],
+    ] {
+        assert!(
+            Command::new("git")
+                .current_dir(ws.path())
+                .args(&args)
+                .output()
+                .expect("git")
+                .status
+                .success()
+        );
+    }
+    std::fs::write(ws.path().join("f.txt"), "x\n").unwrap();
+    for args in [vec!["add", "-A"], vec!["commit", "-qm", "base"]] {
+        Command::new("git")
+            .current_dir(ws.path())
+            .args(&args)
+            .output()
+            .expect("git");
+    }
+    prepare(ws.path()).expect("prepare");
+
+    let source = workspace("credsource2");
+    std::fs::write(
+        source.path().join("auth.json"),
+        r#"{"token":"canary-not-real"}"#,
+    )
+    .unwrap();
+    let home =
+        materialize_credential_home(ws.path(), source.path(), &["auth.json"]).expect("materialize");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::fs::metadata(&home).unwrap().permissions().mode();
+        assert_eq!(
+            dir & 0o077,
+            0,
+            "the credential home is group/other readable"
+        );
+        let file = std::fs::metadata(home.join("auth.json"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(
+            file & 0o077,
+            0,
+            "the credential itself is group/other readable"
+        );
+    }
+
+    // A credential must never become a commit.
+    let status = Command::new("git")
+        .current_dir(ws.path())
+        .args(["status", "--porcelain"])
+        .output()
+        .expect("git");
+    let status = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        status.trim().is_empty(),
+        "the credential home is visible to git and could be committed:\n{status}"
+    );
+}
+
+#[test]
+fn a_credential_the_source_does_not_have_is_an_error_not_a_silent_empty_home() {
+    // Failing closed matters here: a run that launched with an empty credential
+    // home would fail to authenticate deep inside the agent, where the reason is
+    // an opaque 401 rather than "the file you named is not there".
+    let ws = workspace("credmissing");
+    prepare(ws.path()).expect("prepare");
+    let source = workspace("credempty");
+
+    let error = materialize_credential_home(ws.path(), source.path(), &["auth.json"])
+        .expect_err("a missing credential must be an error");
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
 }
