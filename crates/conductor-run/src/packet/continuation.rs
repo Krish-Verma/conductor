@@ -132,6 +132,18 @@ pub struct Observed {
     pub tree_hash: String,
     /// The diff so far.
     pub diff: Diff,
+    /// Which paths the repository shows as changed, sorted.
+    ///
+    /// §6.5 lists *"the actual diff so far"*, and [`Diff`] answers "how much" while
+    /// this answers "where" — which is the half a continuing agent acts on. A
+    /// summary alone tells it three files moved and leaves it to search the tree
+    /// for them; the contents stay linked rather than embedded, so this is paths
+    /// only and the budget is unaffected.
+    ///
+    /// Read from git at §4.8's reconciliation, never from a report: the previous
+    /// agent died without writing one, and even a report that existed would be
+    /// evidence rather than the answer.
+    pub changed_paths: Vec<String>,
     /// Acceptance criterion ids that already verify green **at this tree**.
     ///
     /// "At this tree" is load-bearing: §4.5 binds a result to the exact tree it
@@ -145,12 +157,31 @@ pub struct Observed {
 }
 
 impl Observed {
+    /// Whether anything survived worth telling the next agent about.
+    ///
+    /// This is the line between acceptance rows 2 and 3. Row 2 — a crash before
+    /// edits — says the next attempt gets *"the same packet"*, and a continuation
+    /// packet whose observed half is empty would be that packet plus a section
+    /// saying nothing happened. Row 3 is the case where something did.
+    ///
+    /// A commit counts even with no working-tree change: the agent may have
+    /// committed its work before dying, and that is precisely the state the next
+    /// agent must not duplicate.
+    pub fn is_empty(&self) -> bool {
+        self.tree_hash.is_empty()
+            && self.changed_paths.is_empty()
+            && self.commits.is_empty()
+            && self.partial_report.is_none()
+            && self.diff == Diff::none()
+    }
+
     /// Nothing observed — a crash before anything happened.
     pub fn none() -> Observed {
         Observed {
             reconciliation_verdict: "NO_CHANGE".to_string(),
             tree_hash: String::new(),
             diff: Diff::none(),
+            changed_paths: Vec::new(),
             criteria_green: Vec::new(),
             commits: Vec::new(),
             partial_report: None,
@@ -185,6 +216,13 @@ impl ContinuationPacket {
             Value::from(self.observed.tree_hash.clone()),
         );
         o.insert(Value::from("diff"), self.observed.diff.to_value());
+        let mut paths = self.observed.changed_paths.clone();
+        paths.sort();
+        paths.dedup();
+        o.insert(
+            Value::from("changed_paths"),
+            Value::Sequence(paths.into_iter().map(Value::from).collect()),
+        );
         let mut green = self.observed.criteria_green.clone();
         green.sort();
         o.insert(
@@ -234,6 +272,110 @@ impl ContinuationPacket {
     pub fn to_yaml(&self) -> String {
         serde_yaml::to_string(&super::render(&self.to_value())).unwrap_or_default()
     }
+}
+
+/// Measure observed reality for a run whose previous attempt never finished.
+///
+/// # Why every field is measured and none is assumed
+///
+/// §4.8's table says a crashed attempt whose changes are in scope reconciles
+/// `CLEAN_NO_REPORT`, so this function could have written that string and moved
+/// on. It does not, because the verdict is the one field a reader would trust
+/// most and the one a stale assumption would corrupt most quietly: a crash that
+/// also touched `.conductor/**`, or moved a remote, reconciles as something else
+/// entirely, and a packet that told the next agent `CLEAN_NO_REPORT` about it
+/// would be describing a run that did not happen.
+///
+/// So it does what §4.7's recovery does — re-observe the workspace against the
+/// baseline the attempt stored, and classify — which is also why it needs the
+/// artifact root and an ordinal. §4.7 calls this *"startup reconciliation from
+/// disk"*; this is the same measurement for a different reader.
+///
+/// A baseline that cannot be read yields [`Observed::none`] rather than an error.
+/// That is the fail-closed direction *for this question*: the caller's fallback is
+/// the implementation packet, which tells the agent less than the truth rather
+/// than something untrue.
+pub fn observe_run(
+    store: &Store,
+    run_id: &RunId,
+    workspace: &std::path::Path,
+    artifacts_root: &std::path::Path,
+    previous_ordinal: i64,
+    scope: &conductor_git::Scope,
+    sensitive: &conductor_git::SensitivePatterns,
+) -> Observed {
+    let baseline_path = crate::paths::ArtifactRoot::new(artifacts_root)
+        .attempt_dir(run_id, previous_ordinal)
+        .join("baseline.json");
+    let Ok(bytes) = std::fs::read(&baseline_path) else {
+        return Observed::none();
+    };
+    let Ok(baseline) = serde_json::from_slice::<conductor_git::Baseline>(&bytes) else {
+        return Observed::none();
+    };
+    let Ok(observed) = conductor_git::observe(workspace, &baseline) else {
+        return Observed::none();
+    };
+    let reconciliation =
+        conductor_git::reconcile(&baseline, &observed, scope, sensitive, None, None);
+
+    // Which criteria already verify green **at the tree that is there now**. Read
+    // from `verification_check` rather than recomputed: §4.5 binds a result to a
+    // tree hash, and re-running the checks here would be a second verification
+    // nobody asked for.
+    let mut criteria_green = stored_passing_checks(store, run_id);
+    criteria_green.sort();
+    criteria_green.dedup();
+
+    // The partial report, if the dead agent left one. §6.5 lists it, and §4.8 is
+    // the reason it is only ever *evidence*: a report with no attempt behind it
+    // says what the agent believed, not what happened.
+    let partial_report = std::fs::read_to_string(
+        crate::paths::ArtifactRoot::new(artifacts_root)
+            .attempt_dir(run_id, previous_ordinal)
+            .join("report.json"),
+    )
+    .ok();
+
+    Observed {
+        reconciliation_verdict: reconciliation.verdict.to_string(),
+        tree_hash: observed.repo.tree_hash.clone(),
+        diff: Diff::summary(reconciliation.changed_paths.len(), 0, 0),
+        changed_paths: reconciliation.changed_paths.clone(),
+        criteria_green,
+        // Oid and subject, in the order they were made — §6.5 asks for *"commits
+        // in the run clone"*, and a bare oid tells the next agent nothing about
+        // what its predecessor thought it was doing. Parents are dropped: the
+        // topology is not something the agent acts on, and §6.5 bounds the packet.
+        commits: observed
+            .new_commits
+            .iter()
+            .map(|c| format!("{} {}", short_oid(&c.oid), c.subject))
+            .collect(),
+        partial_report,
+    }
+}
+
+/// A commit id, shortened the way git does for a human.
+///
+/// Twelve, not seven: §6.5's packet is read by an agent that may `git show` what
+/// it finds, and a prefix short enough to be ambiguous in a busy repository is a
+/// command that fails for a reason the agent cannot diagnose.
+fn short_oid(oid: &str) -> &str {
+    &oid[..oid.len().min(12)]
+}
+
+/// Check ids this run has a `PASS` for.
+fn stored_passing_checks(store: &Store, run_id: &RunId) -> Vec<String> {
+    let Ok(mut stmt) = store.conn().prepare(
+        "SELECT DISTINCT check_id FROM verification_check
+          WHERE run_id = ?1 AND outcome = 'PASS'",
+    ) else {
+        return Vec::new();
+    };
+    stmt.query_map(rusqlite::params![run_id.as_str()], |row| row.get(0))
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default()
 }
 
 /// Build the continuation packet for one run — §6.5.

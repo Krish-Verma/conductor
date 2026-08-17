@@ -267,7 +267,11 @@ pub fn seed_parents_at(store: &mut Store, root: &Path) {
 /// are nominally doing. A test driving a **real** agent has to pass its own, or
 /// the packet would ask for one thing and the assertion would look for another —
 /// which is exactly the class of mismatch §6.5 exists to remove.
-pub const DEFAULT_OBJECTIVE: &str = "Add a greeting helper to the library.";
+/// Names the file it asks for, deliberately. §3.7 makes the objective the field
+/// that tells an agent what to do, and a real plan task names its artifact — which
+/// is also what lets `Step::FinishFromPacket` derive the work from the packet
+/// instead of from a script (S12's Verify line).
+pub const DEFAULT_OBJECTIVE: &str = "Add a greeting helper to src/greeting.rs.";
 
 /// The same, for a fixture whose task must ask for something specific.
 pub fn seed_parents_with_objective(store: &mut Store, root: &Path, objective: &str) {

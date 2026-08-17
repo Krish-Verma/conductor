@@ -254,5 +254,102 @@ to the agent is written to `<artifacts>/<run>/agent/report-schema.json`. A packe
 field naming a path that does not resolve is the failure nobody sees, which is
 exactly ADR-0016's reasoning about unresolvable decision refs.
 
-**Still not done, and S12 is still not complete:** items 1, 2, 4, 6 and 7 of §7,
-plus the report-schema reconciliation above. The Verify line has not been run.
+---
+
+## 10. §7's items 2, 4, 5 and 7 are DONE — ADR-0018
+
+§7's list said the packet does not reach any agent, the repair packet is not
+composed, the report schema is not a file, and there is no secret-safety test.
+All four are now done, and the reason they were all still open was one finding:
+
+> **The packets were built and never delivered.** `task run` passed
+> `spec.objective()`. Worse, `repair::driver` built the repair packet, returned it
+> in `Attempted { packet }` for *reporting*, and launched the attempt with
+> something else — so §6.5's `do_not_retry` list, *"what stops attempt 2 from being
+> attempt 1 again"*, had never been seen by attempt 2. S6's own test asserted the
+> packet's contents from that returned value; its name claimed delivery. The name
+> was the tell, and it passed for two slices.
+
+* **`StartInput` carries the instruction per-attempt** (`with_prompt` deleted). A
+  packet cannot exist before the workspace does, and §4.6 gives attempt 2 a
+  different one.
+* **All three of §6.5's packets now have consumers**, and which one an attempt gets
+  is decided by *how the previous attempt ended* — row 2 (crashed, nothing
+  survived) gets the implementation packet, row 3 (crashed, work survived) the
+  continuation packet, row 7 (exited, verification failed) the repair packet. The
+  verification result cannot be the discriminator: a crash whose surviving work
+  fails a check is `ObservationKind::Failed`, indistinguishable from row 7 by kind.
+  Row 2's boundary is measured by re-observing the workspace against the stored
+  baseline, not read off §4.8's table.
+* **Every attempt stores `packet.yaml`** beside its `report.json`, as a plain
+  artifact rather than through the side-effect ledger — a packet is a pure function
+  of durable state (§6.6), while a baseline is a measurement that cannot be re-taken.
+* **Secrets are redacted** at one chokepoint both the YAML and the hashed bytes pass
+  through, so the digest names what was delivered.
+* **`schemas/agent-report.v1.json` exists**, bound to `REPORT_SCHEMA_JSON` by
+  `include_str!`; the packet's `report_schema` is its `$id` rather than a path that
+  resolved for nobody.
+
+**Three findings about the tests**, all exposed by the delivery, none a product
+defect: run fixtures registered `root_path = '/fixture'`; acceptance rows 13 and 14
+were passing because the pinned policy snapshot was *undecodable*, so the gate
+failed closed — the right answer by the wrong mechanism; and there were two
+verification profiles, the product reading the one nothing wrote.
+
+**Gate:** 96 suites, 1158 passed, 0 failed, 3 ignored, 0 panics (S11: 94 / 1124).
+`fmt` clean; `clippy --all-targets --all-features -D warnings` clean.
+
+---
+
+## 11. The Verify line — RUN, and non-vacuous
+
+> An agent handed **only** a continuation packet completes a task interrupted
+> mid-way, on a fixture, **with no session resume**.
+
+`s12_verify_line_a_fresh_agent_finishes_from_the_continuation_packet_alone`, in
+`crates/conductor-run/tests/repair_loop.rs`. Each clause is *arranged*, not asserted
+after the fact:
+
+| clause | how it is made true |
+|---|---|
+| *interrupted mid-way* | attempt 1 writes `src/scratch.rs` and is `SIGKILL`ed; work survives, no report exists, and the required check still fails so the run stays alive |
+| *a continuation packet* | Part 9 row 3's routing, and the worker stores it at `artifacts/<run>/2/packet.yaml` |
+| **handed *only*** | attempt 2's scenario is a single `finish_from_packet` step, which takes **no parameters** |
+| *no session resume* | `session_resume: false` on the adapter, **and** the assertion reads `attempt.agent_session_id` out of the store for every attempt |
+
+The *"only"* clause is the one that needed a new mechanism. Every other fake-agent
+step is scripted — the scenario file says what to write — so a test built from them
+would have proved the *scenario* was sufficient and said nothing about the packet;
+an empty packet would have passed just as well. That is ADR-0006's vacuity, and it
+is why `Step::FinishFromPacket` takes no arguments: it opens
+`CONDUCTOR_FAKE_PACKET`, refuses unless the document carries an objective, a scope
+and acceptance criteria, and derives the file to write from the packet's own
+objective. A packet that stopped being sufficient breaks the test and names which
+field it lost.
+
+**Mutation, verified applied.** Disabling the continuation route in
+`repair::driver` (`} else if false && unfinished {`, confirmed present in the source
+before the run) killed exactly two tests — this one and
+`row_3_a_crash_after_edits_gives_the_next_attempt_a_continuation_packet` — and left
+the other 13 in the file passing. So the routing is load-bearing for precisely the
+claims that name it, and for nothing else. Reverted; 15/15 green.
+
+**What it does not prove:** that a *reasoning* agent can use the packet. It proves
+the packet carries enough, and that finishing needs no state the dead process took
+with it — which is the stop point, *"recovery does not depend on hidden state"*. The
+real-agent half belongs with S15/S16's real-agent suite.
+
+---
+
+## 12. What is still not done
+
+1. **`TARGET_PACKET_BYTES` is advisory and the fixture packets exceed it.** §6.5
+   *targets* 4 KB; only `MAX_PACKET_BYTES` is enforced. Enforcing the target would
+   be a behaviour change, not a tightening, and it is not decided here.
+2. **Separate-process regenerability is proven for the implementation packet only.**
+   `the_stored_packet_is_the_one_the_state_produces` rebuilds it from the store in a
+   different process than the one that wrote it; the *continuation* packet's
+   equivalent is proven as determinism plus `observe_run`'s measurement, not as a
+   second process. §7's item 6 is therefore half closed.
+3. **No real agent has acted on a packet.** §11's last paragraph: the deterministic
+   half is proven, the model half is S15/S16's.

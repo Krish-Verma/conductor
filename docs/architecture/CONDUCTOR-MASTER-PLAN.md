@@ -3,7 +3,7 @@
 **Version:** 1.0 (authoritative)
 **Date:** 2026-08-12
 **Supersedes:** `CONDUCTOR-ARCHITECTURE-REVIEW.md`, `CONDUCTOR-CONVERGENCE-PASS-01.md`
-**Status:** design complete. **S0–S11 implemented** (see Part 8 for per-slice state and `docs/reports/` for the evidence). This line was stale from S1 through S11 — it still read *"no implementation has begun"* after eleven slices had shipped — and is called out here because a status line nobody updates is how a document starts being read as history rather than as specification.
+**Status:** design complete. **S0–S12 implemented** (see Part 8 for per-slice state and `docs/reports/` for the evidence). This line was stale from S1 through S11 — it still read *"no implementation has begun"* after eleven slices had shipped — and is called out here because a status line nobody updates is how a document starts being read as history rather than as specification.
 
 This document is self-contained. Someone with only this file should be able to build Conductor.
 
@@ -1646,6 +1646,20 @@ report_schema: schemas/agent-report.v1.json
 
 **Repair packet** adds only: failing check IDs · the failure fingerprint · a bounded log excerpt (first failing assertion + 40 lines, never the full log) · the diff of what the previous attempt changed · attempt ordinal and remaining budget · an explicit `do_not_retry` list of approaches already tried. That last field is what stops attempt 2 from being attempt 1 again.
 
+> **Which of the three packets an attempt gets — settled at S12 (ADR-0018).** This section defines three packets and never says who receives which. Part 9 does, across three rows, and the discriminator is **how the previous attempt ended** — not what verification said about it:
+>
+> | row | previous attempt | next attempt is told |
+> |---|---|---|
+> | 2 | crashed, nothing survived | *"new attempt, **same packet**"* — the implementation packet |
+> | 3 | crashed, work survived | *"verify current tree; **continuation packet**"* |
+> | 7 | **exited**, verification failed | the repair packet |
+>
+> The verification result cannot be the discriminator, and that is the subtle part: `repair::observation::observe` gives a verification failure precedence over the attempt's terminal state, so a crash whose surviving work then fails a check is `ObservationKind::Failed` — indistinguishable from row 7 by kind alone. What separates them is whether an agent ever **finished a turn**. An agent that exited made choices that can be wrong, and `do_not_retry` is about not repeating them; an agent that died made no choices worth avoiding, and its successor needs to know what is already in the tree. `attempt.outcome` is durable, so the distinction survives the restart §4.7 exists for.
+>
+> Row 2's boundary is measured, not assumed: `continuation::observe_run` re-observes the workspace against the baseline the dead attempt stored and classifies it, exactly as §4.7's recovery does, and an *empty* observed half falls back to the implementation packet. Writing `CLEAN_NO_REPORT` from §4.8's table without looking would be wrong for the crash that also touched `.conductor/**` or moved a remote.
+>
+> `Observed` also carries **`changed_paths`**, which this section does not name: *"the actual diff so far"* has a "how much" half and a "where" half, and a stat line alone leaves a continuing agent to search the tree for its predecessor's work. Paths only — the contents stay linked, so the budget is unaffected.
+
 **Continuation packet** = implementation packet **plus observed reality**: `reconciliation_verdict`, current tree hash vs base, the actual diff so far, which criteria already verify green at the current tree, commits in the run clone, the partial report if any, and explicitly:
 
 > *"The previous agent's reasoning is not available. Treat its intent as inferable only from the diff."*
@@ -2164,13 +2178,13 @@ adapter clause.)*
 
 ---
 
-### S12 — Packets and reports
+### S12 — Packets and reports  ✅ **COMPLETE 2026-08-17**
 
 **Objective.** Generate every packet from durable state.
 **Dependencies.** S11, S10.
 **Scope.** Implementation, repair, continuation packets · report schema · context minimization · evidence linking · determinism · **`conductor task run` claims a task materialized from an approved plan version (added at S12, ADR-0017)**.
 **Tests.** **The same state produces a byte-identical packet twice** · packet size budget enforced · continuation packet regenerable after total process restart · **an unapproved plan runs nothing, and an approved one runs, through the shipped binary**.
-**Verify.** An agent handed **only** a continuation packet completes a task interrupted mid-way, on a fixture, **with no session resume**.
+**Verify.** An agent handed **only** a continuation packet completes a task interrupted mid-way, on a fixture, **with no session resume**. ✅ `s12_verify_line_a_fresh_agent_finishes_from_the_continuation_packet_alone`, with the continuation route mutated out to prove it is load-bearing.
 **Stop point.** Recovery does not depend on hidden state.
 
 > **Why the core verb is in S12's scope at all.** It was not in the original scope

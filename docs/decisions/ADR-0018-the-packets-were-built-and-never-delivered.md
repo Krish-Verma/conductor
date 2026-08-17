@@ -107,6 +107,37 @@ it, so the crate does not build without it. The packet field carries the schema'
 `$id`, because as a path it could not resolve for anybody: a packet is generated
 for the *user's* project.
 
+## Which packet an attempt gets
+
+§6.5 defines three packets and never says who receives which. **Part 9 does**, and
+I had first written that the master plan left it open — it does not. Rows 2, 3 and
+7 specify it between them, and the discriminator is **how the previous attempt
+ended**:
+
+| row | previous attempt | next attempt is told |
+|---|---|---|
+| 2 | crashed, nothing survived | *"new attempt, **same packet**"* — the implementation packet |
+| 3 | crashed, work survived | *"verify current tree; **continuation packet**"* |
+| 7 | **exited**, verification failed | the repair packet |
+
+The verification result cannot be the discriminator, and missing that is what made
+the question look open. `repair::observation::observe` gives a verification failure
+precedence over the attempt's terminal state, so a crash whose surviving work then
+fails a check is `ObservationKind::Failed` — indistinguishable from row 7 by kind
+alone. What separates them is whether an agent ever **finished a turn**: one that
+exited made choices that can be wrong, and `do_not_retry` is about not repeating
+them; one that died made no choices worth avoiding, and its successor needs to know
+what is already in the tree. `attempt.outcome` is durable, so this survives the
+restart §4.7 exists for. An attempt row with no outcome yet reads as `STALE` —
+*"we do not know"* — and routes with the crashes, which is the safe direction.
+
+Row 2's boundary is **measured**: `continuation::observe_run` re-observes the
+workspace against the baseline the dead attempt stored and classifies it, the same
+measurement §4.7's recovery makes, and an empty observed half falls back to the
+implementation packet. Writing `CLEAN_NO_REPORT` straight from §4.8's table would
+have been wrong for the crash that also touched `.conductor/**` or moved a remote —
+the one case where the field a reader trusts most would have been a guess.
+
 ## Three findings about the *tests*, which the delivery exposed
 
 Making the packet real gave the run path three new reads of durable state — the
@@ -185,14 +216,19 @@ the gate — `a_task_that_was_never_materialized_is_not_subject_to_the_binding_r
 
 ## What this DOES NOT prove
 
-* **That the continuation packet has a consumer.** It does not. §6.5 specifies
-  three packets and the product now delivers two: `resume_task` deliberately runs
-  no new agent, so a crashed-then-incomplete run routes to repair and gets the
-  *repair* packet. Acceptance row 3 says *"crash after edits → verify current
-  tree; continuation packet"*, which implies repair-after-crash should compose the
-  continuation packet while repair-after-verification-failure composes the repair
-  one. **That question is open and is S12's Verify line.** Recorded here so it is
-  not mistaken for done.
+* **That a *reasoning* agent can use a packet.** S12's Verify line is run and
+  green — `s12_verify_line_a_fresh_agent_finishes_from_the_continuation_packet_alone`
+  — and what it proves is that the packet **carries enough**: attempt 2's entire
+  input is the packet file, because `Step::FinishFromPacket` takes no parameters and
+  derives the work from the packet's own objective, refusing if the document lacks
+  an objective, a scope or its criteria. That is the stop point (*"recovery does not
+  depend on hidden state"*) and it is not the same claim as "a model can act on it".
+  The model half belongs with S15/S16's real-agent suite.
+
+  The mutation is recorded because the test's value depends on it: disabling the
+  continuation route (`} else if false && unfinished {`, verified present in the
+  source before the run) killed exactly this test and the row-3 delivery test, and
+  left the other thirteen in the file green.
 * **That an agent can finish from a packet alone.** That is the Verify line, and
   it has not been run. Note that proving it needs an agent that *acts on* the
   packet: a scripted fake that ignores its instruction would make the test
@@ -213,6 +249,9 @@ the gate — `a_task_that_was_never_materialized_is_not_subject_to_the_binding_r
 * **Falsified if** attempt 2's stored packet lacks `do_not_retry` while attempt
   1's has it, or both are identical — the first means delivery regressed, the
   second means the composition collapsed.
+* **Falsified if** a crashed attempt's successor is handed a `packet: repair`.
+  That is row 3 being routed as row 7, and it means the discriminator has drifted
+  back to the verification result.
 * **Falsified if** `redact` is moved after hashing, or applied to only one of the
   YAML and the canonical bytes: the digest would then name a document nobody has.
 * **Falsified if** a run fixture reappears whose `project.root_path` is not a
@@ -232,4 +271,10 @@ the gate — `a_task_that_was_never_materialized_is_not_subject_to_the_binding_r
   the schema's single artifact, and `report_schema` as an identifier.
 * **§4.6** — the session-policy clause pairs `new_session_on_attempt: 2` with the
   repair packet; that pairing is now real rather than described.
-* **Part 9 row 3** — its "continuation packet" clause is the open question above.
+* **§6.5** — gains the table above: which of the three packets an attempt gets,
+  and why the discriminator is the previous attempt's outcome rather than its
+  verification result. Also records `Observed::changed_paths`, which §6.5 does not
+  name: *"the actual diff so far"* has a "where" half, and a stat line alone leaves
+  a continuing agent to search the tree for its predecessor's work.
+* **Part 9 rows 2, 3 and 7** — they were already the specification; nothing in
+  them changes. What changes is that all three are now reachable.
