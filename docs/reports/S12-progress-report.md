@@ -204,3 +204,55 @@ run` claim a task materialised from an approved plan version, so the plan ledger
 the packet, the eligibility gate and row-21 pinning are all on one path. Items
 1, 2 and 4 above become straightforward once that exists, and S16 cannot be
 honest without it.
+
+---
+
+## 9. §2.2 is DONE — ADR-0017
+
+Recorded here rather than by editing §7's list above, so that the honest list
+stays the honest list as it stood.
+
+`conductor task run` now claims a task materialised from an **approved** plan
+version. `conductor_run::plan::runnable` is the single place that decides whether
+a task may run; `conductor plan approve` materialises, because approval is the
+event that changes what work exists; `--spec`, `conductor_run::spec` and
+`conductor_core::task::{TaskSpec, ValidatedTaskSpec, TaskSpecError}` are deleted.
+**11 tests** in `crates/conductor-cli/tests/task_run_plan.rs`, every one through
+the shipped binary, with a positive control for every refusal.
+
+Seven mechanisms that were implemented and unreachable from the core verb are
+reachable: §4.3's approval gate · both §4.2 gates (`declared_actions` and
+`execution_requirements` were `NULL` on every real run) · §5.2's dependency edge ·
+§5.2's restart clause · §3.3 control 2 at run start · row 21's supersession.
+
+**Four further defects the fix exposed**, all fixed, all recorded in ADR-0017:
+
+1. Row 30's persisted `BLOCKED` state was invisible at the CLI boundary — every
+   `run_task` error mapped to §7.2's `1`, so a script could not tell an ineligible
+   execution mode from a crash and `--json` printed nothing. The store now decides
+   the exit code.
+2. The vertical claimed *"the next run"* rather than this task's run, which a
+   materialised plan makes reachable without an adversary.
+3. `task run` on a terminal task created a second `READY` run before failing.
+4. Deleting the task spec orphaned two of its five refusals; `blank_objective` and
+   `non_positive_attempt_budget` are restored as validator rules, and the
+   empty-scope one is deliberately not (it already fails closed in
+   `conductor_git::Scope`).
+
+**One new finding, not previously recorded anywhere.** §7's item 5 says the report
+schema does not exist as a file. The larger half is that §6.5's documented report
+shape and the shipped one **disagree**: §6.5 specifies `task_id` / `status`
+(`complete|partial|blocked`) / `files_changed` / `commands_run` /
+`acceptance_criteria` / `deviations` / `blockers` / `unverified_claims`, while
+`conductor_agent::codex::REPORT_SCHEMA_JSON` and `conductor_core::AgentReport`
+ship `claim` (`COMPLETE|PARTIAL|FAILED`) / `files_touched` / `summary`. Different
+field names **and** a different status vocabulary. Separately,
+`packet::implementation::REPORT_SCHEMA_PATH` is the bare relative string
+`schemas/agent-report.v1.json`, which in a generated packet resolves against the
+*user's* repository, where no such file exists — while the schema actually handed
+to the agent is written to `<artifacts>/<run>/agent/report-schema.json`. A packet
+field naming a path that does not resolve is the failure nobody sees, which is
+exactly ADR-0016's reasoning about unresolvable decision refs.
+
+**Still not done, and S12 is still not complete:** items 1, 2, 4, 6 and 7 of §7,
+plus the report-schema reconciliation above. The Verify line has not been run.

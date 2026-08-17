@@ -31,6 +31,8 @@ fn start_input() -> StartInput {
         workspace: PathBuf::from("/ws/r-0041"),
         report_path: PathBuf::from("/artifacts/r-0041/1/report.json"),
         session_id: None,
+        instructions: "packet: implementation\nobjective: \"Add a helper.\"\n".to_string(),
+        instructions_path: PathBuf::from("/artifacts/r-0041/1/packet.yaml"),
         env: Default::default(),
     }
 }

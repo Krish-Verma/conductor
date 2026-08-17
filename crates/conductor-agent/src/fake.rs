@@ -24,6 +24,16 @@ pub const SCENARIO_ENV: &str = "CONDUCTOR_FAKE_SCENARIO";
 pub const REPORT_ENV: &str = "CONDUCTOR_FAKE_REPORT";
 /// The environment variable naming the attempt, for provenance in output.
 pub const ATTEMPT_ENV: &str = "CONDUCTOR_FAKE_ATTEMPT";
+/// The environment variable naming the packet the attempt was given (§6.5).
+///
+/// A **path**, not the packet's text. A real agent gets the instruction as an
+/// argument (§6.2's positional `PROMPT`), and this stand-in takes the path
+/// instead for one reason: it is what makes the packet's arrival *checkable*. A
+/// scenario — or a test reading the child's recorded environment — can compare
+/// the file byte-for-byte against the artifact the worker stored, and
+/// "byte-identical" is the property §6.6 actually claims. Passing the text
+/// through the environment would prove only that a string was copied.
+pub const PACKET_ENV: &str = "CONDUCTOR_FAKE_PACKET";
 
 /// The fake agent adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +105,10 @@ impl AgentAdapter for FakeAgent {
         env.insert(
             ATTEMPT_ENV.to_string(),
             format!("{}#{}", input.run_id, input.attempt_ordinal),
+        );
+        env.insert(
+            PACKET_ENV.to_string(),
+            input.instructions_path.to_string_lossy().to_string(),
         );
 
         Ok(AgentCommand {

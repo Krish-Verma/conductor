@@ -946,6 +946,33 @@ fn plan_approve(store: &mut Store, params: &Value) -> Result<Value, Refusal> {
     )
     .map_err(|err| Refusal::refused(err.to_string()))?;
 
+    // §5.2's task list, written here because **this** is the event that changes
+    // what work exists (added at S12).
+    //
+    // `materialize` refuses anything short of `APPROVED`, so before this call
+    // site existed the only things that could reach it were the library, its
+    // tests and `conductor recover` — which meant that after a human approved a
+    // plan, `conductor task list` was empty and `task run` had no task to claim.
+    // It is also what makes acceptance row 21 reachable from the product path:
+    // approving v4 supersedes v3's idle tasks and *carries* the one holding an
+    // active run, and nothing else in the system performs that transition.
+    //
+    // Decisions are synced first because §6.5's packet resolves a task's
+    // `decisions:` refs against registered rows, and a task materialized ahead of
+    // the decision it names would produce a refusal on its first run.
+    //
+    // Order relative to `approve`: after. `materialize` reads the plan through
+    // the store's `plan_version` row and refuses a version that is not
+    // `APPROVED`, so it cannot run first — and a materialisation that failed
+    // must not un-approve a decision a human already made at the socket. The
+    // failure is reported instead, and re-running `plan approve` completes it,
+    // because both calls are idempotent.
+    let validated = revalidate(&root, version, approval.content_hash.as_str(), &catalogue)?;
+    conductor_run::decision::register_decisions(store, &project_id)
+        .map_err(|err| Refusal::refused(err.to_string()))?;
+    let materialized = plan::materialize(store, &project_id, version, &validated, now_ms())
+        .map_err(|err| Refusal::refused(err.to_string()))?;
+
     Ok(json!({
         "plan_version": approval.plan_version_id.as_str(),
         "version": approval.version,
@@ -954,7 +981,67 @@ fn plan_approve(store: &mut Store, params: &Value) -> Result<Value, Refusal> {
         "approved_at": approval.approved_at_ms,
         "policy_hash": approval.policy_hash,
         "sidecar": plan::approved_path(approval.version),
+        "tasks_created": materialized
+            .created
+            .iter()
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>(),
+        "tasks_carried": materialized
+            .carried
+            .iter()
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>(),
+        "tasks_superseded": materialized
+            .superseded
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>(),
     }))
+}
+
+/// The `ValidatedPlan` [`plan::materialize`] needs, re-derived from the document
+/// that was just approved.
+///
+/// # Why this exists rather than reusing the one `register_plan_version` returns
+///
+/// [`ledger::register_plan_version`] hands back the validated document with the
+/// row — but it only runs when the row does **not** exist yet. Re-approving an
+/// existing version (§5.2's restart clause) takes the other branch, and
+/// materialisation still needs the document. So the choice is between a second
+/// read here and a `register_plan_version` call that would try to walk
+/// `APPROVED → VALIDATED`, which §5.2 forbids.
+///
+/// # The window this closes
+///
+/// A second read is a second chance for the file to have changed. Rather than
+/// ignore that, the text is hashed and compared against the hash the approval was
+/// *granted over*: if they differ, somebody wrote to the plan between
+/// [`ledger::approve`] and here, and the answer is a refusal naming both hashes —
+/// §3.3's *"execution halts — it is never resynced"*, applied to a window a few
+/// microseconds wide. The approval itself stands; it was real. What is refused is
+/// materialising work from a document nobody approved.
+fn revalidate(
+    root: &Path,
+    version: u32,
+    approved_hash: &str,
+    catalogue: &std::collections::BTreeSet<String>,
+) -> Result<plan::ValidatedPlan, Refusal> {
+    let path = root.join(plan::plan_path(version));
+    let text = std::fs::read_to_string(&path)
+        .map_err(|err| Refusal::refused(format!("plan document {}: {err}", path.display())))?;
+    let hash = plan::content_hash(&text).map_err(|err| Refusal::refused(err.to_string()))?;
+    if hash.as_str() != approved_hash {
+        return Err(Refusal::refused(format!(
+            "{} changed between the approval and materialising its tasks: \
+             approved {approved_hash}, now {}. §3.3 halts on a disagreement \
+             rather than resyncing it — re-run `conductor plan approve {version}` \
+             on the document you mean",
+            path.display(),
+            hash.as_str()
+        )));
+    }
+    let document = plan::parse(&text).map_err(|err| Refusal::refused(err.to_string()))?;
+    plan::validate(&document, catalogue).map_err(|report| Refusal::refused(report.to_string()))
 }
 
 /// The policy snapshot the human is approving under — §3.1's sidecar carries it.

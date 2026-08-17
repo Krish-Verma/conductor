@@ -40,11 +40,13 @@
 //!
 //! # No `deny_unknown_fields`
 //!
-//! `conductor_core::TaskSpec` states the rule and the reason: *"a spec written
-//! for a later Conductor must still load; the fields it does not know about are
-//! the later Conductor's business."* §3.2 requires an approved plan to travel
-//! with the repository to another machine, and a machine running an older
-//! Conductor that refuses to read the plan is a machine where §3.2 is false.
+//! The rule and the reason: a plan written for a later Conductor must still load,
+//! and the fields it does not know about are the later Conductor's business. S5's
+//! task spec stated it first; S12 deleted that type, so the statement lives here
+//! now — beside the only document it still governs. §3.2 requires an approved
+//! plan to travel with the repository to another machine, and a machine running
+//! an older Conductor that refuses to read the plan is a machine where §3.2 is
+//! false.
 //!
 //! The obvious hole — an ignored key is a key an agent can add for free — is
 //! closed in [`crate::plan::hash`] rather than here: the content hash is taken
@@ -173,10 +175,11 @@ pub struct Slice {
 
 /// A task — `T-0012`. The unit a run executes.
 ///
-/// This is the shape S5's `conductor_core::TaskSpec` said it was standing in
-/// for: *"Deliberately absent: […] dependencies and acceptance-criterion
-/// bindings (S11 — and inventing a half-version of those here is exactly what
-/// would have to be unpicked)."*
+/// This is the shape S5's task spec said it was standing in for: *"Deliberately
+/// absent: […] dependencies and acceptance-criterion bindings (S11 — and
+/// inventing a half-version of those here is exactly what would have to be
+/// unpicked)."* S12 deleted that stopgap once `task run` read this type instead,
+/// so this is now the only answer to "what is a task?".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Task {
     /// Stable id (§3.6). Appears in run branches, findings and commit trailers.

@@ -180,6 +180,24 @@ pub struct WorkerConfig {
     /// worker does not decide, it is told, and a `None` on attempt 2 is repair
     /// having deliberately discarded a session that exists.
     pub agent_session_id: Option<String>,
+    /// §6.5's packet for this attempt, when the caller has already decided it.
+    ///
+    /// `None` — the ordinary case — means *derive the implementation packet from
+    /// durable state*, which is what a first attempt gets.
+    ///
+    /// `Some` is §4.6's other case, and the reason this field exists rather than
+    /// the worker always deriving: **a repair attempt gets a different packet**.
+    /// §6.5's repair packet adds the failing checks, the fingerprint, a bounded
+    /// excerpt, the previous diff, the remaining budget and the `do_not_retry`
+    /// list — *"that last field is what stops attempt 2 from being attempt 1
+    /// again"* — and the run's durable state alone cannot say whether the caller
+    /// means "start this task" or "repair it", because both are true of the same
+    /// rows. Only `repair::driver` knows, so only it can say.
+    ///
+    /// Whichever it is, it is written to the same artifact and reaches the agent
+    /// the same way, so `packet.yaml` in an attempt's directory is always exactly
+    /// what that attempt was told.
+    pub instructions: Option<String>,
 }
 
 /// What running one attempt produced.
@@ -340,6 +358,24 @@ pub fn run_one_attempt(
         SystemTime::now(),
     );
 
+    // ---- §6.5's packet, which is what the agent is actually told -----------
+    //
+    // Built **here** and not by the caller, because §6.5's implementation packet
+    // carries `repository.workspace` and the clone is a few dozen lines above
+    // this. It replaces the objective string `conductor task run` used to pass:
+    // one line of prose, where §6.5 specifies the plan's acceptance criteria, the
+    // scope, the decisions the task references, the verification commands and the
+    // policy boundaries.
+    //
+    // A failure here ends the attempt. There is no fallback to "just the
+    // objective": after ADR-0017 a run exists only because an approved plan
+    // declared its task, so a packet that cannot be built means the durable state
+    // and the repository disagree — which is §3.3's halt, not a reason to launch
+    // an agent with less context than the design promises it.
+    let (instructions, instructions_path) =
+        store_packet(store, &run_id, &owned, config.instructions.as_deref())
+            .map_err(WorkerError::Adapter)?;
+
     let report_path = owned.path().join("report.json");
     let start = StartInput {
         run_id: run_id.clone(),
@@ -348,6 +384,8 @@ pub fn run_one_attempt(
         workspace: workspace_path.clone(),
         report_path: report_path.clone(),
         session_id: config.agent_session_id.clone(),
+        instructions,
+        instructions_path,
         env: run_env.clone().with_extra(&agent_env_extra).into_vars(),
     };
     let command = adapter
@@ -718,6 +756,91 @@ fn ensure_workspace(
 /// the crash of the worker that captured it. That makes it exactly the kind of
 /// effect the ledger exists for, and the crash window between `INTENDED` and
 /// `CONFIRMED` is acceptance row 22 in miniature.
+/// Build §6.5's implementation packet, store it as an artifact, and return both
+/// the text the agent gets and the path it was stored at.
+///
+/// # Why this is not a side effect (§4.7)
+///
+/// [`persist_baseline`] goes through the side-effect ledger and this does not,
+/// and the difference is not inconsistency. The ledger exists for effects
+/// Conductor cannot re-derive, or that are visible outside it — its question is
+/// *"did this already happen, and can I tell?"*. A baseline is a **measurement at
+/// a point in time**: once the workspace has changed, the observation cannot be
+/// made again, so a half-written one is a real ambiguity and §4.7's `AMBIGUOUS`
+/// is the only honest answer.
+///
+/// A packet is the opposite. §6.6 requires it to serialize **byte-identically for
+/// identical state**, so re-deriving it *is* the check — if the file on disk
+/// differs from what the current state produces, that is not "an effect whose
+/// outcome is unknown", it is a disagreement with a name. Routing it through the
+/// ledger would add a `side_effect` row per attempt that says nothing the packet's
+/// own hash does not, and would put a row in `task show`'s effect list that never
+/// touched anything outside Conductor.
+///
+/// # The restart case
+///
+/// `reclaim_attempt_dir` reuses an ordinal's directory, so a restarted attempt
+/// finds its own `packet.yaml` already there. Identical bytes are simply accepted
+/// — that is the idempotence §6.6 buys. **Different** bytes are refused rather
+/// than overwritten, for `write_new`'s stated reason: *"an artifact that already
+/// exists was written by somebody, and silently replacing it is the S0 failure at
+/// file granularity."*
+fn store_packet(
+    store: &mut Store,
+    run_id: &RunId,
+    owned: &crate::paths::OwnedDir,
+    decided: Option<&str>,
+) -> Result<(String, PathBuf), String> {
+    let text = match decided {
+        // §4.6's repair packet, composed by `repair::driver` — see
+        // [`WorkerConfig::instructions`].
+        Some(text) => text.to_string(),
+        None => {
+            let packet = crate::packet::implementation::build(store, run_id).map_err(|e| {
+                format!(
+                    "§6.5's implementation packet cannot be built for run {run_id}, \
+                     so there is nothing to tell the agent: {e}"
+                )
+            })?;
+            // Emitted, not merely rendered: `emit` is what enforces §6.5's size
+            // ceiling, and a packet over the bound is a refusal rather than a
+            // truncation.
+            packet.emit().map_err(|e| e.to_string())?;
+            packet.to_yaml()
+        }
+    };
+    let bytes = text.as_bytes();
+
+    match owned.write_new(PACKET_ARTIFACT, bytes) {
+        Ok(path) => Ok((text, path)),
+        Err(crate::paths::OwnershipError::AlreadyExists(path)) => {
+            let existing = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            if existing == bytes {
+                return Ok((text, path));
+            }
+            Err(format!(
+                "{} already exists and is not the packet this attempt was given \
+                 (stored {} bytes, current {}); §6.6 makes an identical state \
+                 produce identical bytes, so this is a disagreement to resolve \
+                 rather than a file to overwrite",
+                path.display(),
+                existing.len(),
+                bytes.len(),
+            ))
+        }
+        Err(other) => Err(other.to_string()),
+    }
+}
+
+/// Where the packet an attempt was given is stored, inside the attempt's
+/// artifact directory.
+///
+/// §6.5: *"Every packet is generated from durable state, content-hashed, and
+/// stored as an artifact."* Per **attempt** rather than per run, because §4.6
+/// gives attempt 2 a different packet and a single file would leave no record of
+/// what attempt 1 was actually asked to do.
+pub const PACKET_ARTIFACT: &str = "packet.yaml";
+
 fn persist_baseline(
     store: &mut Store,
     fence: &Fence,

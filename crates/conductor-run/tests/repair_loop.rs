@@ -322,6 +322,11 @@ fn config(world: &World) -> VerticalConfig {
         probe_key: conductor_run::containment::cache::ProbeKey::new(
             "fake", "test", "none", "n/a", "unprobed",
         ),
+        // `None` is right even here: the *driver* sets it per repair attempt,
+        // composing §6.5's repair packet onto the implementation packet. A value
+        // supplied by the caller would be the same instruction for every attempt,
+        // which is the defect S12 found.
+        instructions: None,
     }
 }
 
@@ -969,6 +974,92 @@ fn attempt_two_is_given_a_packet_that_names_what_attempt_one_already_tried() {
             .any(|p| p.contains("src/attempt-1.rs")),
         "{:?}",
         two.packet.previous_diff
+    );
+}
+
+#[test]
+fn the_repair_packet_is_what_attempt_two_was_actually_told() {
+    // The other half of the test above, and the half that was missing until S12.
+    //
+    // That test asserts the packet is **composed** correctly — from the value the
+    // driver returns. It says nothing about whether the agent ever saw it, and it
+    // did not: the driver built the packet, returned it in `Attempted { packet }`
+    // for reporting, and launched the attempt with whatever the caller had
+    // configured. Every attempt of a run therefore got the same instruction, which
+    // is precisely what §6.5's `do_not_retry` list exists to prevent — a defect of
+    // exactly ADR-0017's kind, one layer down.
+    //
+    // So this reads the **artifact the attempt was given** (§6.5: every packet is
+    // "stored as an artifact") and asserts the repair fields are in it.
+    warm_the_binary();
+    let world = World::new().with_profile(CONTENT_FAILURE_PROFILE);
+    let agent = HostileAgent::new(&world.root(), Hostility::AlwaysFailsIdentically);
+    let repair = RepairConfig::default();
+    let vertical = config(&world);
+    let mut store = world.store();
+
+    repair_once(&mut store, &agent, &vertical, &repair, &mut ()).expect("attempt 1");
+    repair_once(&mut store, &agent, &vertical, &repair, &mut ()).expect("attempt 2");
+    drop(store);
+
+    let packet_for = |ordinal: i64| -> String {
+        let path = world
+            .artifacts()
+            .join(RUN)
+            .join(ordinal.to_string())
+            .join("packet.yaml");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("§6.5 stores every packet: {} — {e}", path.display()))
+    };
+
+    let one = packet_for(1);
+    let two = packet_for(2);
+
+    // POSITIVE CONTROL, and it is the point: attempt 1 is an implementation
+    // packet with nothing to avoid. Without this, "attempt 2 has do_not_retry"
+    // would be satisfied by both attempts getting the same repair-shaped packet.
+    assert!(
+        one.contains("packet: implementation"),
+        "attempt 1 gets §6.5's implementation packet: {one}"
+    );
+    assert!(
+        !one.contains("do_not_retry"),
+        "attempt 1 has nothing to not retry: {one}"
+    );
+
+    // Attempt 2 is the composed repair packet: §6.5's six added fields **plus**
+    // the implementation packet, because the section says it "adds only" them.
+    assert!(
+        two.contains("packet: repair"),
+        "attempt 2 gets §6.5's repair packet: {two}"
+    );
+    for added in [
+        "do_not_retry",
+        "failing_checks",
+        "fingerprint",
+        "remaining_budget",
+        "previous_diff",
+        "excerpt",
+    ] {
+        assert!(
+            two.contains(added),
+            "§6.5's repair packet adds {added:?}, and what attempt 2 was told \
+             does not carry it: {two}"
+        );
+    }
+    // "Adds only" — the implementation half is still there, so a repairing agent
+    // still knows the objective and what proves the task done.
+    for base in ["objective", "acceptance_criteria", "verification", "scope"] {
+        assert!(
+            two.contains(base),
+            "the repair packet must ADD to the implementation packet, not replace \
+             it; {base:?} is missing: {two}"
+        );
+    }
+    // And it names what attempt 1 actually did, from durable state.
+    assert!(
+        two.contains("unit-tests"),
+        "the failing check id travels: {two}"
     );
 }
 

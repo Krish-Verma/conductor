@@ -45,13 +45,44 @@
 //! [`TARGET_PACKET_BYTES`] is advisory and reported, [`MAX_PACKET_BYTES`] is a
 //! hard ceiling, and crossing it is a **refusal** naming the overflow — never a
 //! quietly shortened field.
+//!
+//! # Secrets are redacted, not refused (S12)
+//!
+//! A packet is the one artifact Conductor **re-publishes to a different agent**:
+//! §6.5's continuation packet carries the previous attempt's partial report, and
+//! its repair packet carries a failing check's output and the previous diff. All
+//! three are text nobody vetted — a test that printed an environment variable, a
+//! diff that added a credential, an agent that narrated what it exported — and the
+//! next agent is a *separate process, often a separate session*. So every string
+//! in a packet goes through [`crate::verify::secrets::redact`] on its way out, at
+//! [`render`], which is the single point both the YAML and the hashed bytes pass
+//! through.
+//!
+//! **Redacted rather than refused**, and the reason is the same one the budget
+//! gives: refusing would discard the evidence the run stopped for, and a packet
+//! that cannot be delivered is a run that cannot continue. The marker is visible
+//! and names the kind, so a reader can tell text that was removed from text that
+//! never existed — and so `github-token` and `aws-access-key-id` do not collapse
+//! into one indistinguishable blackout, which is the difference between rotating
+//! one credential and rotating two.
+//!
+//! Redaction is a **pure function of the text**, so §6.6 is untouched: identical
+//! state still produces identical bytes. It happens *before* hashing deliberately
+//! — a digest over the unredacted original would name a document nobody has, and
+//! would be the one copy of the secret that survived.
+//!
+//! What it does not catch is written down in
+//! [`crate::verify::secrets::NOT_DETECTED`], and that list is part of this
+//! guarantee rather than a footnote to it.
 
 pub mod continuation;
 pub mod implementation;
+pub mod repair;
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use serde_yaml::Value;
+use serde_yaml::{Mapping, Value};
 
 /// Domain separator for every packet digest.
 ///
@@ -264,12 +295,65 @@ impl Emitted {
 /// [`crate::plan::hash::canonical_bytes`] — length-prefixed, type-tagged, keys
 /// sorted — because two canonicalizers that disagree about what two documents
 /// mean is exactly the failure §3.6 warns about. What differs is the separator.
+///
+/// The document is [`render`]ed first, so the bytes that are hashed are the bytes
+/// that were delivered.
 pub fn canonical_bytes(value: &Value) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(PACKET_CANONICAL_VERSION.as_bytes());
     out.push(b'\n');
-    encode(value, &mut out);
+    encode(&render(value), &mut out);
     out
+}
+
+/// The document as it leaves Conductor: every string redacted, and every kind
+/// found named in a `redacted:` field the reader can see.
+///
+/// One function, used by both the YAML rendering and the canonical bytes, because
+/// the alternative is a hash that covers something other than what was sent. See
+/// this module's docs for why this redacts rather than refuses.
+pub fn render(value: &Value) -> Value {
+    let mut kinds: BTreeSet<&'static str> = BTreeSet::new();
+    let mut redacted = redact_value(value, &mut kinds);
+    if !kinds.is_empty()
+        && let Value::Mapping(map) = &mut redacted
+    {
+        map.insert(
+            Value::from("redacted"),
+            Value::Sequence(kinds.into_iter().map(Value::from).collect()),
+        );
+    }
+    redacted
+}
+
+/// Walk a document, redacting every string in it.
+///
+/// Keys as well as values: a mapping key is text a document author chose, and
+/// §6.5's packets carry author-supplied keys nowhere — but a key that *did* carry
+/// a secret would be the one place a reader would never look.
+fn redact_value(value: &Value, kinds: &mut BTreeSet<&'static str>) -> Value {
+    match value {
+        Value::String(text) => {
+            let out = crate::verify::secrets::redact(text);
+            for kind in &out.kinds {
+                kinds.insert(kind.label());
+            }
+            Value::String(out.text)
+        }
+        Value::Sequence(items) => {
+            Value::Sequence(items.iter().map(|v| redact_value(v, kinds)).collect())
+        }
+        Value::Mapping(map) => {
+            let mut out = Mapping::new();
+            for (k, v) in map {
+                out.insert(redact_value(k, kinds), redact_value(v, kinds));
+            }
+            Value::Mapping(out)
+        }
+        // Numbers, booleans and nulls cannot carry a secret, and round-tripping
+        // them through a redactor would only risk changing them.
+        other => other.clone(),
+    }
 }
 
 /// Canonicalize and hash, refusing anything over [`MAX_PACKET_BYTES`].

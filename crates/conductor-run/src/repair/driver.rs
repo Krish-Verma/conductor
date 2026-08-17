@@ -317,6 +317,47 @@ pub fn repair_once(
         allowed.saturating_sub(spawned),
     );
 
+    // ---- and it is what the agent is told (wired at S12) --------------------
+    //
+    // Until here, this packet was **built and never delivered**: it was returned
+    // in `Attempted { packet, … }` for reporting, while the attempt itself was
+    // launched with whatever the caller had configured — which for every attempt
+    // of a run was the same thing. §6.5's `do_not_retry` list exists because
+    // *"that last field is what stops attempt 2 from being attempt 1 again"*, and
+    // attempt 2 had never seen it. Same class of defect as ADR-0017's: built,
+    // unit-tested, described in a completion report, and not on the product path.
+    //
+    // Composed onto the implementation packet rather than sent alone, because
+    // §6.5 says this packet *"adds only"* those six fields — a repairing agent
+    // still needs the objective, the scope, the acceptance criteria and the
+    // verification commands. A composition failure ends the repair rather than
+    // falling back to the plain implementation packet: that fallback is exactly
+    // "attempt 2 is attempt 1 again", silently.
+    // **Only when there is something to repair.** This loop drives the *first*
+    // attempt too, and for that one every added field is empty: no failing check,
+    // no fingerprint, no excerpt, no previous diff, and a `do_not_retry` list of
+    // nothing. §6.5 defines this packet by what it adds about *"the previous
+    // attempt"*, so labelling attempt 1's instruction `packet: repair` would
+    // describe a history that does not exist — and it would make "attempt 2 was
+    // told what attempt 1 tried" untestable, because both attempts would look the
+    // same. `None` leaves the worker to derive the implementation packet, which is
+    // what an attempt that is not a repair should get.
+    let repairing;
+    let vertical = if observations.is_empty() {
+        vertical
+    } else {
+        let composed = crate::packet::repair::build(store, &run_id, &packet).map_err(|e| {
+            RepairError::NotDriveable(format!(
+                "§6.5's repair packet cannot be composed for run {run_id}: {e}"
+            ))
+        })?;
+        repairing = VerticalConfig {
+            instructions: Some(composed.to_yaml()),
+            ..vertical.clone()
+        };
+        &repairing
+    };
+
     // ---- §4.6's session policy ---------------------------------------------
     //
     // "a stuck agent's context *is* the problem, and resuming re-imports the

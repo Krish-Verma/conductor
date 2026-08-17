@@ -33,5 +33,5 @@ pub use report::{AgentReport, ReportClaim};
 pub use state::{
     AttemptOutcome, ParseStateError, PlanVersionState, ReconciledRoute, RunState, TaskState,
 };
-pub use task::{TaskSpec, TaskSpecError, TransitionError, ValidatedTaskSpec};
+pub use task::TransitionError;
 pub use verification::VerificationOutcome;

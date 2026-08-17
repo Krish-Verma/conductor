@@ -33,14 +33,27 @@
 //!
 //! The stand-in agent records its environment by **name only** for the allowlist
 //! assertion, and records the one value that is a path rather than a secret.
+//!
+//! Every process the fixture spawns — the control socket server and the approval
+//! client included — runs with `HOME` pointed at the synthetic home, so nothing
+//! in this file can reach the operator's real configuration even by accident.
+//!
+//! # The plan is part of the fixture now (S12)
+//!
+//! S12 moved `task run` onto the plan ledger, so the task these tests launch
+//! Codex for exists only because a human approved v1 at the control socket. The
+//! subject is unchanged: what `CODEX_HOME` points at, and what travels into it.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+use conductor_store::Store;
 
 const CONDUCTOR: &str = env!("CARGO_BIN_EXE_conductor");
 
-/// The task Codex is asked to do, and the profile that decides it.
+/// The profile that decides the task Codex is asked to do.
 const PROFILE: &str = r#"
 verification:
   toolchain_fingerprint:
@@ -51,13 +64,47 @@ verification:
       timeout_seconds: 60
 "#;
 
-const SPEC: &str = r#"
-id: T-0012
-objective: Add a greeting helper to the library.
-scope:
-  - "src/**"
-verification_profile: .conductor/verification.yaml
-attempt_budget: 3
+/// §3.1's project file. It declares `adapter: codex` because that is what this
+/// project runs; the command line says so too, which is the surface §4.9's
+/// wiring is asserted through.
+const PROJECT_YAML: &str = r#"
+project:
+  id: p-codex
+  default_branch: main
+  adapter: codex
+"#;
+
+const POLICY_YAML: &str = r#"
+policy:
+  rules: []
+"#;
+
+/// The plan that declares the task Codex is launched for.
+const PLAN_V1: &str = r#"
+plan:
+  id: p-codex
+  version: 1
+  objective: "Prove a Codex launch gets a per-run credential home."
+  milestones:
+    - id: M-01
+      title: "Credential containment"
+      slices:
+        - id: S-01
+          title: "task run --adapter codex"
+          tasks:
+            - id: T-0012
+              objective: "Add a greeting helper to the library."
+              rationale: "The agent must actually be launched for §4.9 to be observable."
+              depends_on: []
+              scope:
+                allowed_globs: ["src/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: .conductor/verification.yaml
+              attempt_budget: 3
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "The library gains a function."
+                  verified_by: [unit-tests]
 "#;
 
 /// A file shaped like a credential and containing nothing of the kind.
@@ -124,10 +171,11 @@ impl Fixture {
 
         let repo = root.join("repo");
         std::fs::create_dir_all(repo.join("src")).expect("mkdir");
-        std::fs::create_dir_all(repo.join(".conductor")).expect("mkdir");
         std::fs::write(repo.join("src/lib.rs"), "pub fn base() -> u32 { 0 }\n").expect("write");
-        std::fs::write(repo.join(".conductor/task.yaml"), SPEC).expect("write");
-        std::fs::write(repo.join(".conductor/verification.yaml"), PROFILE).expect("write");
+        write(&repo, ".conductor/project.yaml", PROJECT_YAML);
+        write(&repo, ".conductor/verification.yaml", PROFILE);
+        write(&repo, ".conductor/policy.yaml", POLICY_YAML);
+        write(&repo, ".conductor/plans/v1/plan.yaml", PLAN_V1);
 
         git(&repo, &["init", "-q", "--initial-branch=main"]);
         git(&repo, &["config", "user.name", "Fixture"]);
@@ -139,6 +187,9 @@ impl Fixture {
         let fixture = Fixture { dir, repo };
         fixture.write_operator_home();
         fixture.write_stub();
+        // `approval serve` refuses to create a store, so the fixture creates it —
+        // the state `conductor init` leaves behind.
+        Store::open_or_create(root.join("conductor.db")).expect("create the store");
         fixture
     }
 
@@ -188,6 +239,46 @@ impl Fixture {
 
     fn store(&self) -> String {
         self.root().join("conductor.db").display().to_string()
+    }
+
+    /// Deliberately short, and **not** canonicalized: a `sockaddr_un` path is
+    /// capped at `SUN_LEN`, macOS resolves `/var/folders/…` to a `/private`
+    /// prefix eight characters longer, and the bind adds a
+    /// `.<name>.<pid>.staging` sibling on top of that.
+    fn socket(&self) -> PathBuf {
+        self.dir.path().join("cs").join("s")
+    }
+
+    /// Make v1 authoritative, as §5.2 requires: a human at the control socket.
+    ///
+    /// `HOME` is redirected here too, so that neither the client nor the server
+    /// can read the operator's real `~/.conductor` or `~/.codex`.
+    fn approve_ok(&self, version: u32) {
+        let out = {
+            let _server = Server::start(self);
+            Command::new(CONDUCTOR)
+                .args([
+                    "plan",
+                    "approve",
+                    &version.to_string(),
+                    "--repo",
+                    &self.repo.display().to_string(),
+                    "--socket",
+                    &self.socket().display().to_string(),
+                    "--json",
+                ])
+                .env("HOME", self.operator_home())
+                .env_remove("CODEX_HOME")
+                .output()
+                .unwrap_or_else(|e| panic!("spawn {CONDUCTOR}: {e}"))
+        };
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "approving v{version}:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// `conductor task run T-0012 --adapter codex`, with the operator's home
@@ -241,6 +332,71 @@ impl Fixture {
     }
 }
 
+/// A `conductor approval serve` process and the socket it published.
+struct Server {
+    child: Child,
+}
+
+impl Server {
+    fn start(fixture: &Fixture) -> Server {
+        let socket = fixture.socket();
+        std::fs::create_dir_all(socket.parent().expect("a parent")).expect("mkdir socket");
+        let child = Command::new(CONDUCTOR)
+            .args([
+                "approval",
+                "serve",
+                "--store",
+                &fixture.store(),
+                "--socket",
+                &socket.display().to_string(),
+            ])
+            .env("HOME", fixture.operator_home())
+            .env_remove("CODEX_HOME")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawn {CONDUCTOR}: {e}"));
+        let mut server = Server { child };
+        // Generous, because M29 measured macOS taking 21.7 s to scan a freshly
+        // built binary before its first instruction runs.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < deadline {
+            if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+                return server;
+            }
+            if let Ok(Some(status)) = server.child.try_wait() {
+                use std::io::Read;
+                let mut said = String::new();
+                if let Some(mut err) = server.child.stderr.take() {
+                    let _ = err.read_to_string(&mut said);
+                }
+                if let Some(mut out) = server.child.stdout.take() {
+                    let _ = out.read_to_string(&mut said);
+                }
+                panic!(
+                    "the control socket server exited {status} before listening at {}: {said}",
+                    socket.display()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("nothing was listening at {}", socket.display());
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn write(root: &Path, relative: &str, text: &str) {
+    let path = root.join(relative);
+    std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+    std::fs::write(&path, text).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+}
+
 fn git(repo: &Path, args: &[&str]) {
     let out = Command::new("git")
         .args(args)
@@ -282,6 +438,7 @@ fn mode(path: &Path) -> u32 {
 #[test]
 fn a_codex_launch_receives_a_credential_home_inside_the_run_workspace() {
     let f = Fixture::new();
+    f.approve_ok(1);
     let out = f.task_run(None);
     assert_eq!(
         out.status.code(),
@@ -345,6 +502,7 @@ fn a_codex_launch_receives_a_credential_home_inside_the_run_workspace() {
 #[test]
 fn the_operators_own_codex_directory_is_never_handed_to_the_agent() {
     let f = Fixture::new();
+    f.approve_ok(1);
     let out = f.task_run(None);
     assert_eq!(out.status.code(), Some(0), "{:?}", out.status);
     let run = json(&out)["run"].as_str().expect("a run id").to_string();
@@ -384,6 +542,7 @@ fn the_operators_own_codex_directory_is_never_handed_to_the_agent() {
 #[test]
 fn codex_written_state_lands_in_the_workspace_and_not_in_the_operators_home() {
     let f = Fixture::new();
+    f.approve_ok(1);
     let out = f.task_run(None);
     assert_eq!(out.status.code(), Some(0), "{:?}", out.status);
     let run = json(&out)["run"].as_str().expect("a run id").to_string();
@@ -422,6 +581,7 @@ fn codex_written_state_lands_in_the_workspace_and_not_in_the_operators_home() {
 #[test]
 fn a_missing_credential_file_refuses_rather_than_launching_with_an_empty_home() {
     let f = Fixture::new();
+    f.approve_ok(1);
     std::fs::remove_file(f.operator_codex().join("auth.json")).expect("remove the credential");
 
     let out = f.task_run(None);
@@ -452,6 +612,7 @@ fn the_agents_environment_is_the_allowlist_plus_codex_home_and_nothing_else() {
     // credential home must add exactly one name — a containment assertion would
     // not notice the day it added two.
     let f = Fixture::new();
+    f.approve_ok(1);
     let out = f.task_run(None);
     assert_eq!(out.status.code(), Some(0), "{:?}", out.status);
 

@@ -72,6 +72,8 @@ fn config(world: &World) -> VerticalConfig {
         probe_key: conductor_run::containment::cache::ProbeKey::new(
             "fake", "test", "none", "n/a", "unprobed",
         ),
+        // The worker derives §6.5's implementation packet — this is not a repair.
+        instructions: None,
     }
 }
 

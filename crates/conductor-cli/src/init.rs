@@ -240,14 +240,28 @@ fn project_id(root: &Path) -> String {
     }
 }
 
-/// The branch a completed run integrates into.
+/// The repository's current branch, recorded in `project.default_branch`.
 ///
-/// Read from the repository rather than assumed, because
-/// `project.default_branch` decides where work lands: writing `main` into a
-/// repository whose branch is `master` is an invented fact with consequences,
-/// and §3.1 makes this file authoritative. `main` is the fallback for a
-/// directory that is not a git repository yet — a value the author can see and
-/// change, not a silent guess about a repository that does not exist.
+/// Read from the repository rather than assumed: writing `main` into a
+/// repository whose branch is `master` is an invented fact, and §3.1 makes this
+/// file authoritative. `main` is the fallback for a directory that is not a git
+/// repository yet — a value the author can see and change, not a silent guess
+/// about a repository that does not exist.
+///
+/// # It does **not** decide where a run's work lands (corrected at S12)
+///
+/// This comment used to say it did, and that was false. `task run` records the
+/// run's `target_branch` from the branch the operator has **checked out** at the
+/// moment the run is created (`ensure_run`), which is deliberate for §4.1's
+/// reason — a checkout the operator makes mid-run must not move where the work
+/// is destined — and is not this field. The field is stored on the `project` row
+/// by `ledger::register_project` and read by nothing at run time.
+///
+/// Left as a recorded value rather than deleted, and the distinction stated here
+/// rather than left to a reader: a doc comment claiming a field is load-bearing
+/// when nothing reads it is worse than an undocumented field, because it is the
+/// kind of false statement that survives a review. Its disposition is tracked in
+/// S12's completion report's configuration audit.
 fn default_branch(root: &Path) -> String {
     conductor_git::run_git(root, &["symbolic-ref", "--short", "HEAD"])
         .ok()
@@ -346,7 +360,13 @@ plan:
               scope:
                 allowed_globs: []
                 forbidden_globs: [\".conductor/**\"]
-              verification_profile: default
+              # A path relative to the repository root, not a profile name:
+              # §3.1's layout has one `verification.yaml` holding one profile, so
+              # there is no second profile for a name to select between. §4.5's
+              # clarification 3 left the reading open until something had to
+              # resolve it; `conductor task run` does, and this is it. A value
+              # that does not resolve is a refusal before the agent launches.
+              verification_profile: .conductor/verification.yaml
               attempt_budget: 3
               acceptance_criteria:
                 - id: AC-1

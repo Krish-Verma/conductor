@@ -100,6 +100,8 @@ fn config(world: &World) -> VerticalConfig {
         // The fake agent authenticates against nothing.
         credential_home: None,
         probe_key: probe_key(),
+        // The worker derives §6.5's implementation packet — this is not a repair.
+        instructions: None,
     }
 }
 
@@ -652,19 +654,51 @@ fn a_materialized_task_is_refused_when_the_runs_policy_cannot_be_read_and_a_neve
     //
     // Collapsing the two would make a row nobody has ever materialized
     // indistinguishable from one that was materialized and proved harmless.
+    //
+    // # What changed at S12, and why the `NULL` half moved down a level
+    //
+    // The `NULL` half used to run this through `run_task` and assert the attempt
+    // **completed**: the §4.3 rule does not apply, so nothing read the policy, so
+    // an undecodable snapshot was harmless. That is still true *of the rule*, and
+    // it is no longer true of the run — because §6.5's packet also reads the
+    // pinned policy, to fill in the `boundaries` an agent is told. A run that
+    // cannot state what requires approval and what is forbidden cannot launch an
+    // agent, whatever its `declared_actions` column says.
+    //
+    // That is a strengthening rather than a regression, and the same fail-closed
+    // reading this test already applies to the other half: "we cannot tell what
+    // the rules are" must never become "there are no rules" on the path that
+    // exists to enforce them. So the `NULL` half now asserts the refusal too, and
+    // the `NULL`-versus-`'[]'` distinction — which is §4.3's, not the packet's —
+    // is asserted where it lives, at the gate, by
+    // [`a_task_that_was_never_materialized_is_not_subject_to_the_binding_rule`].
     let never_materialized = World::new();
     corrupt_policy(&never_materialized);
     {
         let mut store = never_materialized.store();
-        let vertical = run_task(
+        let error = run_task(
             &mut store,
             &success_adapter(&never_materialized),
             &config(&never_materialized),
             &mut (),
         )
-        .expect("a task no plan has ever described keeps its S9 behaviour");
-        assert!(matches!(vertical.outcome, VerticalOutcome::Complete { .. }));
-        assert_eq!(attempts(&never_materialized), 1);
+        .expect_err("§6.5's packet cannot state boundaries it cannot read");
+        assert!(
+            error.to_string().contains("policy"),
+            "the refusal must say the policy was the problem: {error}"
+        );
+        // **Not** `attempts == 0`. This refusal comes from §6.5's packet, which is
+        // built inside the attempt — after the `attempt` row is committed and
+        // before `spawn`. §4.7 makes that ordering deliberate: the row is written
+        // first so a crash can never *under*-count invocations, and its own docs
+        // say the count "can say a spawn happened when the spawn failed". So the
+        // row is the wrong question here; what matters is that no agent ran and the
+        // task did not complete.
+        assert_ne!(never_materialized.run_state(), RunState::Complete);
+        assert!(
+            !never_materialized.workspace().join("src/added.rs").exists(),
+            "the success scenario's edit appeared, so an agent did run"
+        );
     }
 
     let materialized = World::new();
@@ -684,6 +718,54 @@ fn a_materialized_task_is_refused_when_the_runs_policy_cannot_be_read_and_a_neve
     );
     assert_eq!(attempts(&materialized), 0);
     assert_eq!(materialized.run_state(), RunState::Blocked);
+}
+
+#[test]
+fn a_task_that_was_never_materialized_is_not_subject_to_the_binding_rule() {
+    // §4.3's `NULL`-versus-`'[]'` distinction, asserted **at the gate** — which is
+    // where the rule lives, and where it can still be seen now that §6.5's packet
+    // refuses a run whose policy cannot be read (see the test above).
+    //
+    // Both halves point the run at a snapshot that exists and does not decode, so
+    // the rule's second operand is unavailable in both. The only difference is the
+    // column:
+    //
+    // * `NULL` — no plan has ever described this task, so there is no declaration
+    //   for the rule to apply to. The gate has no question to answer and permits.
+    // * `'[]'` — a plan described it and it declares no action. The rule applies,
+    //   its second operand cannot be established, and an undecided rule refuses.
+    //
+    // Schema v8 keeps the two apart for exactly this, and collapsing them would
+    // make a row nobody materialized indistinguishable from one that was
+    // materialized and proved harmless.
+    let probe =
+        conductor_run::containment::cache::ProbeKey::new("fake", "test", "none", "n/a", "unprobed");
+
+    let never = World::new();
+    corrupt_policy(&never);
+    declare(&never, None);
+    let refusal = conductor_run::enforce::launch::gate(&never.store(), &task_id(), &probe)
+        .expect("NULL leaves the rule with nothing to apply to");
+    assert!(
+        refusal.is_none(),
+        "a task no plan has ever described is not subject to §4.3's binding rule: \
+         {refusal:?}"
+    );
+
+    let materialized = World::new();
+    corrupt_policy(&materialized);
+    declare(&materialized, Some("[]"));
+    let error = conductor_run::enforce::launch::gate(&materialized.store(), &task_id(), &probe)
+        .expect_err("a rule whose policy cannot be read must not decide");
+    assert!(
+        error.to_string().contains("policy"),
+        "the refusal must name the operand it could not establish: {error}"
+    );
+}
+
+/// The fixture task's id.
+fn task_id() -> TaskId {
+    TaskId::new(TASK).expect("task id")
 }
 
 #[test]

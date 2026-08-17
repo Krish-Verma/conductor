@@ -63,7 +63,7 @@ impl World {
         let dir = tempfile::tempdir().expect("tempdir");
         let source = common::agent::source_repo(dir.path());
         let mut store = Store::open_or_create(dir.path().join("conductor.db")).expect("store");
-        seed(&mut store, &common::agent::head(&source));
+        seed(&mut store, &common::agent::head(&source), &source);
         World { dir }
     }
 
@@ -80,26 +80,20 @@ impl World {
     }
 }
 
-fn seed(store: &mut Store, base_commit: &str) {
+/// Seed the parent rows this matrix needs.
+///
+/// `source` is the **registered tree**, and it stopped being a fiction at S12:
+/// §6.5's packet is generated from durable state *plus the plan document in that
+/// tree*, so a project row pointing at `/fixture` now means an attempt that cannot
+/// be told what to do. `write_conductor_layout` (via `seed_parents_at`) puts a real
+/// `.conductor/` there.
+fn seed(store: &mut Store, base_commit: &str, source: &Path) {
+    common::vertical::seed_parents_at(store, source);
     conductor_store::with_immediate(store.conn_mut(), |tx| {
-        tx.execute(
-            "INSERT INTO project (id, root_path, repo_identity, default_branch, config_hash, created_at)
-             VALUES ('p-1', '/fixture', 'blake3:repo', 'main', 'blake3:cfg', 0)",
-            [],
-        )?;
-        tx.execute(
-            "INSERT INTO plan_version (id, project_id, version, content_hash, state, source_path)
-             VALUES ('pv-1', 'p-1', 1, 'blake3:plan', 'APPROVED', 'plan.yaml')",
-            [],
-        )?;
-        tx.execute(
-            "INSERT INTO policy_snapshot (hash, canonical_blob, created_at) VALUES (?1, '{}', 0)",
-            rusqlite::params![common::agent::POLICY_HASH],
-        )?;
         tx.execute(
             "INSERT INTO task (id, plan_version_id, slice_id, state, scope_globs,
                                verification_profile, attempt_budget, created_at)
-             VALUES ('T-0012', 'pv-1', 'S3', 'READY', '[\"src/**\"]', 'default', 3, 0)",
+             VALUES ('T-0012', 'pv-1', 'S3', 'READY', '[\"src/**\"]', '.conductor/verification.yaml', 3, 0)",
             [],
         )?;
         tx.execute(

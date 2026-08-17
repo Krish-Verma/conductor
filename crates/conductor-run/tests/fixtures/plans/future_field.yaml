@@ -4,12 +4,13 @@
 # Two things must both be true of this file, and they pull in opposite
 # directions:
 #
-#   * It **loads**. `conductor_core::TaskSpec` states the reason — "a spec
-#     written for a later Conductor must still load; the fields it does not know
-#     about are the later Conductor's business" — and §2.2 forbids
-#     `deny_unknown_fields` outright. A plan that a newer Conductor wrote and an
-#     older one refuses to read is a plan that does not survive the trip
-#     §3.2 requires it to survive.
+#   * It **loads**. `plan::model`'s "No `deny_unknown_fields`" section states the
+#     reason — a plan written for a later Conductor must still load, and the
+#     fields it does not know about are the later Conductor's business — and §2.2
+#     forbids `deny_unknown_fields` outright. (S5's task spec stated it first; S12
+#     deleted that type and the statement moved to the module that still needs
+#     it.) A plan that a newer Conductor wrote and an older one refuses to read is
+#     a plan that does not survive the trip §3.2 requires it to survive.
 #
 #   * It **hashes differently** from `valid.yaml`. The hash is computed over the
 #     whole parsed document, not over the subset this version models, because

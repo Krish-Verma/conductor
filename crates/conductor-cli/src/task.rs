@@ -27,15 +27,28 @@
 //! automatically once S6 exists, so calling it "a human is needed" would be
 //! wrong the moment that lands.
 //!
-//! # What `task run` creates, and the one placeholder it writes
+//! # What `task run` claims, and what it refuses to invent (rewritten at S12)
 //!
-//! Part 5.1 makes `task.plan_version_id` a non-null foreign key, and S5 has no
-//! plan ledger. So `task run` writes a `plan_version` row standing for the
-//! task-spec file, in **`DRAFT`** — never `APPROVED`. §5.2 gives `APPROVED` to
-//! "a human at the control socket" and S8 owns that socket; writing `APPROVED`
-//! here to satisfy a foreign key would be a lie in the one table whose whole
-//! purpose is recording what was agreed. It is also why §3.4's `Conductor-Plan`
-//! trailer is not emitted: there is no approved plan version to name.
+//! Until S12 this command read the S5-era `.conductor/task.yaml` and wrote a
+//! `plan_version` row of its own at `version 0`, `state DRAFT`, purely to satisfy
+//! §5.1's non-null foreign key. The comment that stood here predicted its own
+//! replacement by S11 and the replacement never happened, with consequences well
+//! past cosmetic: §4.3's approval gate never ran on the product path, and
+//! `task.declared_actions`, `task.depends_on`, `task.acceptance_criteria` and
+//! `task.execution_requirements` — the four columns S11's materializer writes and
+//! §4.2/§4.3's gates read — were `NULL` on every real run, so both gates compared
+//! nothing and proceeded.
+//!
+//! Now this command **claims** a task and invents nothing. The task row and its
+//! `plan_version` come from [`conductor_run::plan::materialize`], which runs when
+//! a human approves a version at the control socket, and
+//! [`conductor_run::plan::runnable`] is the single place that decides whether a
+//! given task may run at all. What is left here is what a CLI owes: resolving the
+//! repository, the adapter and the store, mapping refusals onto §7.2's codes, and
+//! rendering the result.
+//!
+//! §3.4's `Conductor-Plan` trailer is emitted as a consequence — there is now a
+//! real approved plan version to name.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -44,7 +57,7 @@ use std::time::Duration;
 use clap::{Args, Subcommand};
 use conductor_core::{RunState, TaskId, TaskState};
 use conductor_run::vertical::{VerticalConfig, VerticalOutcome, run_task};
-use conductor_store::{NewRun, NewTask, Store};
+use conductor_store::{NewRun, Store};
 use serde::Serialize;
 
 use crate::exit;
@@ -74,14 +87,11 @@ pub struct StoreArgs {
 /// `conductor task run <task-id>`
 #[derive(Debug, Args)]
 pub struct RunArgs {
-    /// The task, which must match the spec's `id`.
+    /// The task, which an approved plan version must declare.
     pub task_id: String,
     /// The repository. Defaults to the working directory.
     #[arg(long)]
     pub repo: Option<PathBuf>,
-    /// The task spec. Defaults to `<repo>/.conductor/task.yaml`.
-    #[arg(long)]
-    pub spec: Option<PathBuf>,
     /// Which agent to run: `fake` or `codex` (§6.2). Overrides
     /// `.conductor/project.yaml`'s `adapter:` for this run only.
     ///
@@ -120,6 +130,12 @@ pub struct ListArgs {
 struct RunReport {
     task: String,
     run: String,
+    /// The approved plan version this run is pinned to — acceptance row 21's
+    /// evidence, and the answer to "what authorized this run?".
+    plan_version: u32,
+    /// That version's content hash, so a report can be checked against the
+    /// document without trusting the version number alone.
+    plan_hash: String,
     /// The task's state when the command returned.
     state: TaskState,
     /// Which agent ran, and which of §3.1's two doors named it.
@@ -321,24 +337,8 @@ fn do_run(args: &RunArgs, shared: &StoreArgs) -> Result<ExitCode, Failure> {
         .canonicalize()
         .map_err(|e| Failure::new(exit::NOT_INITIALIZED, format!("{}: {e}", repo.display())))?;
 
-    let spec_path = args
-        .spec
-        .clone()
-        .unwrap_or_else(|| repo.join(conductor_run::spec::DEFAULT_SPEC_PATH));
-    let (spec, spec_hash) = conductor_run::spec::load(&spec_path)
-        .map_err(|e| Failure::new(exit::FAILURE, e.to_string()))?;
-
-    if spec.id().as_str() != args.task_id {
-        return Err(Failure::new(
-            exit::USAGE,
-            format!(
-                "asked for task {} but {} defines {}",
-                args.task_id,
-                spec_path.display(),
-                spec.id()
-            ),
-        ));
-    }
+    let task_id = conductor_core::TaskId::new(&args.task_id)
+        .map_err(|e| Failure::new(exit::USAGE, e.to_string()))?;
 
     let mut store = open_store(shared)?;
     // The *name* is checked before anything durable is written; the object is
@@ -348,15 +348,50 @@ fn do_run(args: &RunArgs, shared: &StoreArgs) -> Result<ExitCode, Failure> {
     let selected = Adapter::parse(&adapter_name)?;
     let state = conductor_state_dir(shared, &repo)?;
 
-    let run_id = ensure_task_and_run(&mut store, &repo, &spec, &spec_hash)
-        .map_err(|e| Failure::new(exit::FAILURE, e))?;
+    // §3.2's authority, asked before anything durable is written: which approved
+    // plan version says this task exists and may run. Every refusal it can
+    // return is a refusal to *start*, so the store is left as it was.
+    let runnable = conductor_run::plan::runnable::resolve(&store, &repo, &task_id)
+        .map_err(runnable_failure)?;
+
+    // §4.5's profile, loaded before the run exists rather than at the moment the
+    // checks would run. A task naming a profile Conductor cannot read is a task
+    // whose criteria are bound to nothing — and discovering that after an agent
+    // has already edited the repository turns a configuration mistake into a
+    // wasted attempt and a workspace to clean up.
+    let profile_path = runnable.profile_path();
+    conductor_run::verify::profile::load(&profile_path).map_err(|e| {
+        Failure::new(
+            exit::NOT_INITIALIZED,
+            format!(
+                "task {task_id} names verification_profile {:?}, and {}: {e}. \
+                 §4.5's clarification 3 is settled as a path relative to the \
+                 repository root; {} is where `conductor init` puts it",
+                runnable.task.verification_profile,
+                profile_path.display(),
+                conductor_run::plan::VERIFICATION_CONFIG_PATH
+            ),
+        )
+    })?;
+
+    // Asked and discarded, deliberately: it refuses **here** if the approved
+    // document no longer declares this task, which is a disagreement between the
+    // store and the repository (§3.3 halts on those). What the task says is read
+    // again by the packet builder, from the same document — this is the check, not
+    // the data.
+    runnable.declared().map_err(runnable_failure)?;
+
+    let run_id = ensure_run(&mut store, &repo, &runnable).map_err(|e| {
+        // A policy that cannot be read, a detached HEAD, or a store write that
+        // failed. None of them is "a human must decide", so none of them is 3.
+        Failure::new(exit::FAILURE, e)
+    })?;
 
     let workspaces_root = state.join("workspaces");
     let artifacts_root = state.join("artifacts");
     let launch = build_launch(
         selected,
         args,
-        &spec,
         // The path `run_one_attempt` will clone into. The adapter is given it up
         // front because §6.2's adapter normalises reported paths against it, and
         // `CodexAgent::command` refuses a workspace that disagrees — so a
@@ -367,13 +402,13 @@ fn do_run(args: &RunArgs, shared: &StoreArgs) -> Result<ExitCode, Failure> {
     let adapter = launch.adapter;
 
     let config = VerticalConfig {
-        task_id: spec.id().clone(),
+        task_id: task_id.clone(),
         worker_id: format!("cli-{}", std::process::id()),
         source_repo: repo.clone(),
         workspaces_root: workspaces_root.clone(),
         artifacts_root: artifacts_root.clone(),
         quarantine_root: state.join("quarantine"),
-        profile_path: repo.join(spec.verification_profile()),
+        profile_path,
         scratch_index: state.join("scratch").join("index"),
         supervisor: conductor_run::SupervisorConfig::default(),
         lease_ms: conductor_store::LEASE_MS,
@@ -394,13 +429,59 @@ fn do_run(args: &RunArgs, shared: &StoreArgs) -> Result<ExitCode, Failure> {
             adapter.id(),
             &conductor_run::containment::probe::Host::detect(),
         ),
+        // §6.5's packet is derived by the worker, from the approved plan this run
+        // is pinned to, once the workspace exists. `Some` here would be this
+        // command deciding what the agent is told, which is what it used to do
+        // with the objective string — see ADR-0017.
+        instructions: None,
     };
 
-    let result = run_task(&mut store, adapter.as_ref(), &config, &mut ())
-        .map_err(|e| Failure::new(exit::FAILURE, e.to_string()))?;
+    let result = match run_task(&mut store, adapter.as_ref(), &config, &mut ()) {
+        Ok(result) => result,
+        // # The store outranks the return value (found at S12)
+        //
+        // Several refusals write their verdict durably and *then* return `Err`.
+        // Acceptance row 30 is the clearest: `enforce::launch::gate` refuses,
+        // the task and run go to `BLOCKED` with a `CRITICAL` finding naming the
+        // dimension, and only after that does `run_task` error. Mapping every
+        // error to §7.2's `1` therefore reported "generic failure" for a state
+        // §7.2 gives its own code to — *"3 action required … ← scriptable 'human
+        // needed'"* — and this module's own docs already said `BLOCKED` belongs
+        // there. A wrapper script could not tell row 30 from a crash, and
+        // `--json` printed nothing at all, so the finding the refusal exists to
+        // leave behind was invisible at the boundary that produced it.
+        //
+        // So the persisted state decides, exactly as §4.8's doctrine says it
+        // must: what is in the store is what happened, and a library return
+        // value is a claim about it.
+        Err(error) => {
+            let report = stopped_report(
+                &store,
+                &task_id,
+                &run_id,
+                &runnable,
+                AdapterReport {
+                    id: adapter_name,
+                    source: adapter_source.as_str(),
+                },
+                &error.to_string(),
+            );
+            let code = match report.state {
+                TaskState::AwaitingReview | TaskState::AwaitingApproval | TaskState::Blocked => {
+                    exit::ACTION_REQUIRED
+                }
+                _ => exit::FAILURE,
+            };
+            // The message still goes to stderr: an operator reading a terminal
+            // must see why, and `--json` carries the same reason for a script.
+            eprintln!("error: {error}");
+            emit(shared, &report, || render_run(&report));
+            return Ok(ExitCode::from(code));
+        }
+    };
 
     let task_state = store
-        .task(spec.id())
+        .task(&task_id)
         .ok()
         .flatten()
         .map(|t| t.state)
@@ -449,8 +530,10 @@ fn do_run(args: &RunArgs, shared: &StoreArgs) -> Result<ExitCode, Failure> {
     };
 
     let report = RunReport {
-        task: spec.id().as_str().to_string(),
+        task: task_id.as_str().to_string(),
         run: run_id,
+        plan_version: runnable.version(),
+        plan_hash: runnable.plan_version.content_hash.clone(),
         state: task_state,
         adapter: AdapterReport {
             id: adapter_name,
@@ -474,6 +557,64 @@ fn do_run(args: &RunArgs, shared: &StoreArgs) -> Result<ExitCode, Failure> {
     let code = exit_code_for(&result, task_state);
     emit(shared, &report, || render_run(&report));
     Ok(ExitCode::from(code))
+}
+
+/// What the store says happened, for a run the vertical could not finish.
+///
+/// Everything here is read from the store rather than inferred from the error,
+/// because the point of the path this serves is that the refusal was *recorded*
+/// before it was returned. The one thing that cannot be read is a reconciliation
+/// verdict: a run that never launched an agent has nothing to reconcile, and
+/// §4.8's "every exit from `RUNNING` passes through reconciliation" stays
+/// literally true precisely because row 30's gate runs before the claim. So the
+/// field says `NOT_RECONCILED` rather than borrowing a verdict from somewhere.
+fn stopped_report(
+    store: &Store,
+    task_id: &TaskId,
+    run_id: &str,
+    runnable: &conductor_run::plan::Runnable,
+    adapter: AdapterReport,
+    reason: &str,
+) -> RunReport {
+    let state = store
+        .task(task_id)
+        .ok()
+        .flatten()
+        .map(|task| task.state)
+        .unwrap_or(TaskState::Pending);
+    let findings = conductor_core::RunId::new(run_id)
+        .ok()
+        .and_then(|id| store.findings_for_run(&id).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|f| format!("{}: {}", f.kind, f.evidence_ref))
+        .collect();
+
+    RunReport {
+        task: task_id.as_str().to_string(),
+        run: run_id.to_string(),
+        plan_version: runnable.version(),
+        plan_hash: runnable.plan_version.content_hash.clone(),
+        state,
+        adapter,
+        outcome: "STOPPED",
+        reason: Some(reason.to_string()),
+        verdict: "NOT_RECONCILED".to_string(),
+        commit: None,
+        integrated: None,
+        verification: stored_checks(store, run_id)
+            .into_iter()
+            .map(|check| CheckReport {
+                check_id: check.check_id,
+                outcome: check.outcome,
+                tree_hash: check.tree_hash,
+                from_cache: false,
+            })
+            .collect(),
+        refusals: Vec::new(),
+        deferred: Vec::new(),
+        findings,
+    }
 }
 
 /// §7.2, applied to what the vertical produced.
@@ -719,21 +860,58 @@ fn resolve_policy(repo: &Path) -> Result<conductor_run::policy::model::ResolvedP
     .map_err(|e| e.to_string())
 }
 
-/// Create the task and run rows the vertical needs, if they are not there.
-fn ensure_task_and_run(
+/// §7.2's code for a refusal to start, and the message a human reads.
+///
+/// The line §7.2 draws is between *"no project / not initialized / store
+/// unhealthy"* (`2`) and *"the command ran and the answer was no"* (`1`), and
+/// [`crate::plan`] and [`crate::recover`] both draw it the same way. A store this
+/// machine has never registered the project in is `2` — the cure is `plan
+/// approve` or `recover`, not a decision. A plan whose document no longer hashes
+/// to what was approved is `1`: both halves were read and a verdict was reached,
+/// and §3.3's *"execution halts — it is never resynced"* is a thing a human must
+/// adjudicate.
+fn runnable_failure(error: conductor_run::plan::RunnableError) -> Failure {
+    use conductor_run::plan::LedgerError;
+    use conductor_run::plan::runnable::RunnableError as R;
+
+    let code = match &error {
+        R::Project(_) | R::Store(_) | R::Io { .. } | R::UnregisteredProject { .. } => {
+            exit::NOT_INITIALIZED
+        }
+        R::Ledger(ledger) => match ledger {
+            LedgerError::Project(_)
+            | LedgerError::Io { .. }
+            | LedgerError::Git(_)
+            | LedgerError::Store(_)
+            | LedgerError::UnknownProject { .. } => exit::NOT_INITIALIZED,
+            _ => exit::FAILURE,
+        },
+        R::Plan(_)
+        | R::MalformedId { .. }
+        | R::ForeignTree { .. }
+        | R::NoSuchTask { .. }
+        | R::NotAuthoritative { .. }
+        | R::ForeignPlanVersion { .. }
+        | R::Terminal { .. }
+        | R::TaskNotInDocument { .. } => exit::FAILURE,
+    };
+    Failure::new(code, error.to_string())
+}
+
+/// Create the run row the vertical claims, if this task does not already have
+/// one.
+///
+/// The task row is **not** created here, and that is the whole point of S12's
+/// correction: a task exists because a human approved a plan that declares it
+/// (§3.2, §5.2), and a command that could conjure one would be a second
+/// authority for what work exists.
+fn ensure_run(
     store: &mut Store,
     repo: &Path,
-    spec: &conductor_core::task::ValidatedTaskSpec,
-    spec_hash: &str,
+    runnable: &conductor_run::plan::Runnable,
 ) -> Result<String, String> {
     let now = now_ms();
-    let project_id = format!(
-        "p-{}",
-        short(&conductor_core::effect::content_hash(
-            repo.display().to_string().as_bytes(),
-        ))
-    );
-    let plan_version_id = format!("pv-{}", short(spec_hash));
+    let task_id = runnable.task.id.clone();
 
     // §4.4: "At run creation Conductor canonically serializes the resolved
     // policy … and pins `policy_hash` on the run." Resolved from the global and
@@ -750,58 +928,7 @@ fn ensure_task_and_run(
     conductor_run::policy::load::persist(store.conn_mut(), &snapshot, now)
         .map_err(|e| e.to_string())?;
 
-    conductor_store::with_immediate(store.conn_mut(), |tx| {
-        tx.execute(
-            "INSERT OR IGNORE INTO project
-               (id, root_path, repo_identity, default_branch, config_hash, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                project_id,
-                repo.display().to_string(),
-                conductor_core::effect::content_hash(repo.display().to_string().as_bytes()),
-                "main",
-                spec_hash,
-                now
-            ],
-        )?;
-        // DRAFT, never APPROVED — see this module's docs. The row exists to
-        // satisfy `task.plan_version_id`, and it says exactly what it is: the
-        // task-spec file S11 will replace.
-        tx.execute(
-            "INSERT OR IGNORE INTO plan_version
-               (id, project_id, version, content_hash, state, source_path)
-             VALUES (?1, ?2, 0, ?3, 'DRAFT', ?4)",
-            rusqlite::params![
-                plan_version_id,
-                project_id,
-                spec_hash,
-                conductor_run::spec::DEFAULT_SPEC_PATH
-            ],
-        )?;
-        Ok(())
-    })
-    .map_err(|e| e.to_string())?;
-
-    if store.task(spec.id()).map_err(|e| e.to_string())?.is_none() {
-        store
-            .create_task(
-                &NewTask {
-                    id: spec.id().clone(),
-                    plan_version_id,
-                    slice_id: "S5".to_string(),
-                    scope_globs: spec.scope().to_vec(),
-                    verification_profile: spec.verification_profile().to_string(),
-                    attempt_budget: spec.attempt_budget(),
-                },
-                now,
-            )
-            .map_err(|e| e.to_string())?;
-    }
-
-    if let Some(existing) = store
-        .active_run_for_task(spec.id())
-        .map_err(|e| e.to_string())?
-    {
+    if let Some(existing) = runnable.active_run.as_ref() {
         return Ok(existing.as_str().to_string());
     }
 
@@ -829,10 +956,10 @@ fn ensure_task_and_run(
         .create_run(
             &NewRun {
                 id: run_id.clone(),
-                task_id: spec.id().clone(),
+                task_id: task_id.clone(),
                 policy_hash,
                 base_commit,
-                run_branch: format!("conductor/{}/{run_id}", spec.id()),
+                run_branch: format!("conductor/{task_id}/{run_id}"),
                 target_branch,
             },
             now,
@@ -956,7 +1083,6 @@ struct Launch {
 fn build_launch(
     selected: Adapter,
     args: &RunArgs,
-    spec: &conductor_core::task::ValidatedTaskSpec,
     workspace: &Path,
     run_artifacts: &Path,
 ) -> Result<Launch, Failure> {
@@ -995,16 +1121,17 @@ fn build_launch(
                 .unwrap_or_else(|| PathBuf::from("codex"));
 
             Ok(Launch {
-                adapter: Box::new(
-                    conductor_agent::codex::CodexAgent::new(
-                        binary,
-                        workspace.to_path_buf(),
-                        schema,
-                    )
-                    // §3.7: the objective is the thing that tells the agent what
-                    // to do, and a spec without one does not validate.
-                    .with_prompt(spec.objective()),
-                ),
+                // No prompt: what the agent is told is §6.5's packet, and the
+                // worker builds it once the workspace exists — see
+                // `StartInput::instructions`. This used to pass the task's
+                // objective, one line of prose where §6.5 specifies the
+                // acceptance criteria, the scope, the referenced decisions, the
+                // verification commands and the policy boundaries.
+                adapter: Box::new(conductor_agent::codex::CodexAgent::new(
+                    binary,
+                    workspace.to_path_buf(),
+                    schema,
+                )),
                 credential_home: Some(conductor_run::enforce::env::CredentialHomeRequest {
                     variable: "CODEX_HOME".to_string(),
                     source: operator_codex_home()?,
@@ -1072,13 +1199,6 @@ fn git_line(repo: &Path, args: &[&str]) -> Result<String, String> {
         return Err(format!("git {args:?} failed: {}", out.stderr));
     }
     Ok(out.stdout_trimmed())
-}
-
-fn short(hash: &str) -> String {
-    hash.trim_start_matches("blake3:")
-        .chars()
-        .take(12)
-        .collect()
 }
 
 fn emit<T: Serialize>(shared: &StoreArgs, report: &T, render: impl FnOnce() -> String) {

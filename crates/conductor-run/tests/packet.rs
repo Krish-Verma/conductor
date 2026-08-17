@@ -646,3 +646,158 @@ fn a_continuation_packet_links_a_large_diff_rather_than_carrying_it() {
         "with a path and a digest:\n{y}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Secret safety — §6.5's surfaces that carry text nobody vetted
+// ---------------------------------------------------------------------------
+
+/// Disposable canaries. **Every value here is fake**, and shaped only so that
+/// `verify::secrets` recognises the *form* — the point is to prove the packet
+/// redacts, and a real credential would prove it by doing the thing this test
+/// exists to prevent.
+mod canary {
+    /// `AKIA` + 16 upper-case alphanumerics. AWS's own documentation example.
+    pub const AWS: &str = "AKIAIOSFODNN7EXAMPLE";
+    /// `ghp_` + 36. Not a token: a repeated pattern of the right length.
+    pub const GITHUB: &str = "ghp_0123456789abcdef0123456789abcdef0123";
+    /// §4.9's shape: credentials inline in a URL.
+    ///
+    /// The password is deliberately **8+ characters**. `secrets::is_placeholder`
+    /// suppresses shorter values on purpose — a 6-character "password" is far more
+    /// often a variable name or an example than a credential — so a canary like
+    /// `hunter2` tests the placeholder rule rather than the detector, and reads as
+    /// a scanner gap when it is the fixture that is wrong.
+    pub const DB_PASSWORD: &str = "n0t-a-real-password";
+    pub const DB_URL: &str = "postgres://conductor:n0t-a-real-password@db.invalid:5432/app";
+}
+
+#[test]
+fn a_partial_report_that_leaked_a_credential_does_not_reach_the_next_agent() {
+    // The continuation packet's `partial_report` is **agent-produced text**, and
+    // §6.5 hands the packet to a *different* agent. Nothing else in the packet has
+    // that property: the objective, the criteria and the decisions are documents a
+    // human wrote and committed. So this is the surface where a secret arrives
+    // from outside and is then re-published, and the one worth testing hardest.
+    let repo_dir = repo();
+    let dir = tempfile::tempdir().expect("dir");
+    let db = dir.path().join("conductor.db");
+    let (_p, run) = live(repo_dir.path(), &db, 1_000);
+    let mut store = Store::open_existing(&db).expect("store");
+
+    let leaked = format!(
+        "I exported the key {} and set DATABASE_URL={} before running the tests.",
+        canary::AWS,
+        canary::DB_URL
+    );
+    let observed = continuation::Observed {
+        reconciliation_verdict: "CLEAN_NO_REPORT".to_string(),
+        tree_hash: "blake3:aaaa".to_string(),
+        diff: continuation::Diff::summary(1, 2, 0),
+        criteria_green: Vec::new(),
+        commits: Vec::new(),
+        partial_report: Some(leaked),
+    };
+
+    let built = continuation::build(&mut store, &run, &observed).expect("continuation");
+    let rendered = built.to_yaml();
+
+    // Not "the packet was refused" — refusing would discard the reason the run
+    // stopped, which §6.5's size rule already forbids for the same reason. The
+    // packet is delivered with the value removed and the fact recorded.
+    assert!(
+        !rendered.contains(canary::AWS),
+        "an AWS-shaped canary survived into the packet:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains(canary::DB_PASSWORD),
+        "a URL password survived into the packet:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("REDACTED"),
+        "the redaction must be visible, or a reader cannot tell text was removed \
+         from text that never existed:\n{rendered}"
+    );
+    // The surrounding prose is still there: a redaction that ate the sentence
+    // would lose the observation the next agent needs.
+    assert!(
+        rendered.contains("before running the tests"),
+        "only the secret is removed:\n{rendered}"
+    );
+
+    // And the hash covers what was delivered, not the unredacted original —
+    // otherwise the digest names a document nobody has.
+    let bytes = String::from_utf8(built.canonical_bytes()).expect("utf8");
+    assert!(
+        !bytes.contains(canary::AWS) && !bytes.contains(canary::DB_PASSWORD),
+        "the hashed bytes still carry the secret"
+    );
+}
+
+#[test]
+fn redaction_is_deterministic_and_reports_what_it_found() {
+    // §6.6 is not weakened by redaction: it is a pure function of the text, so
+    // the same state still produces the same bytes. Asserted because a redactor
+    // that inserted a counter, an offset or a random marker would break the one
+    // property every packet hash depends on.
+    let repo_dir = repo();
+    let a = tempfile::tempdir().expect("a");
+    let b = tempfile::tempdir().expect("b");
+    let (_p1, run1) = live(repo_dir.path(), &a.path().join("conductor.db"), 1_000);
+    let (_p2, run2) = live(repo_dir.path(), &b.path().join("conductor.db"), 9_999_000);
+
+    let leaked = format!("token {} and key {}", canary::GITHUB, canary::AWS);
+    let observed = |report: &str| continuation::Observed {
+        reconciliation_verdict: "CLEAN_NO_REPORT".to_string(),
+        tree_hash: "blake3:aaaa".to_string(),
+        diff: continuation::Diff::summary(1, 2, 0),
+        criteria_green: Vec::new(),
+        commits: Vec::new(),
+        partial_report: Some(report.to_string()),
+    };
+
+    let mut store_a = Store::open_existing(a.path().join("conductor.db")).expect("a");
+    let mut store_b = Store::open_existing(b.path().join("conductor.db")).expect("b");
+    let one = continuation::build(&mut store_a, &run1, &observed(&leaked)).expect("a");
+    let two = continuation::build(&mut store_b, &run2, &observed(&leaked)).expect("b");
+
+    assert_eq!(
+        one.canonical_bytes(),
+        two.canonical_bytes(),
+        "redaction must be deterministic, or §6.6's byte-identical claim is false"
+    );
+    assert_eq!(one.hash(), two.hash());
+
+    // Both kinds are named. A redaction that collapsed everything to one marker
+    // would hide that two different classes of credential were present, which is
+    // the difference between "rotate a token" and "rotate a token and a key".
+    let rendered = one.to_yaml();
+    assert!(rendered.contains("github-token"), "{rendered}");
+    assert!(rendered.contains("aws-access-key-id"), "{rendered}");
+}
+
+#[test]
+fn a_clean_packet_is_not_marked_redacted() {
+    // POSITIVE CONTROL. Without it, every assertion above is satisfied by a
+    // packet that stamps "REDACTED" over everything — which would pass the
+    // secret tests and destroy the packet.
+    let repo_dir = repo();
+    let dir = tempfile::tempdir().expect("dir");
+    let db = dir.path().join("conductor.db");
+    let (_p, run) = live(repo_dir.path(), &db, 1_000);
+    let mut store = Store::open_existing(&db).expect("store");
+
+    let rendered = implementation::build(&mut store, &run)
+        .expect("packet")
+        .to_yaml();
+
+    assert!(
+        !rendered.contains("REDACTED"),
+        "nothing in this fixture is a secret:\n{rendered}"
+    );
+    // …and the fixture's real content is intact.
+    assert!(
+        rendered.contains("Generate the implementation packet"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("AC-1"), "{rendered}");
+}

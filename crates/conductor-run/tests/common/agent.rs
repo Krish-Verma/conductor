@@ -112,6 +112,12 @@ pub fn start_input(dir: &Path) -> StartInput {
         workspace: dir.to_path_buf(),
         report_path: dir.join("artifacts").join("report.json"),
         session_id: None,
+        // A stand-in packet: these fixtures test the supervisor and the adapters,
+        // and neither reads the instruction's *content*. The real one is built by
+        // `worker::store_packet` from durable state, and the tests that assert
+        // that are the ones that drive a whole run.
+        instructions: "packet: implementation\nobjective: \"Do the fixture's work.\"\n".to_string(),
+        instructions_path: dir.join("artifacts").join("packet.yaml"),
         env,
     }
 }

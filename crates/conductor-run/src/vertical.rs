@@ -108,6 +108,13 @@ pub struct VerticalConfig {
     /// A key nobody has probed misses the cache, and a miss is `fail_closed()`,
     /// so getting this wrong refuses rather than permits.
     pub probe_key: crate::containment::cache::ProbeKey,
+    /// §6.5's packet for the next attempt, when the caller has already decided
+    /// it — see [`crate::worker::WorkerConfig::instructions`].
+    ///
+    /// `None` means the worker derives the implementation packet from durable
+    /// state, which is what an ordinary `task run` wants. `repair::driver` sets
+    /// it, because only repair knows that this attempt is a repair.
+    pub instructions: Option<String>,
 }
 
 /// How the vertical ended.
@@ -310,8 +317,32 @@ pub fn run_task_with_session(
         Err(error) => return Err(block_ineligible(store, config, &error.to_string())),
     }
 
+    // **This task's** run, never "the next one" (corrected at S12).
+    //
+    // `claim_next_run` selects `ORDER BY priority, created_at LIMIT 1` across
+    // every run in the store, which was safe by accident while the S5-era path
+    // put one task and one run in each store: "the next run" and "this task's
+    // run" could not disagree. A plan materializes **many** tasks into one
+    // store, so they can — and the ordinary way to get there needs no
+    // adversary. A task refused on an unmet dependency has already had its run
+    // row created; running the dependency next then claims the *refused* task's
+    // run, drives an agent in its branch and its workspace, and writes the task
+    // state against a different row entirely.
+    //
+    // `conductor_store` already draws this distinction for `conductor recover`:
+    // *"startup recovery needs the run it is recovering, not 'the next one'"*.
+    // The predicate is identical — `tests/claim.rs::the_targeted_claim_shares_
+    // the_general_claims_predicate` holds the two statements together — so this
+    // narrows *which* run is eligible and changes nothing about *whether* one
+    // is.
+    let mine = store.active_run_for_task(&config.task_id)?.ok_or_else(|| {
+        WorkerError::Adapter(format!(
+            "task {} has no active run to claim; it is in {}",
+            config.task_id, task.state
+        ))
+    })?;
     let claimed = store
-        .claim_next_run(&config.worker_id, now_ms(), config.lease_ms)?
+        .claim_run(&mine, &config.worker_id, now_ms(), config.lease_ms)?
         .ok_or_else(|| {
             WorkerError::Adapter(format!(
                 "task {} has no claimable run; it is in {}",
@@ -345,6 +376,7 @@ pub fn run_task_with_session(
         agent_env_extra: config.agent_env_extra.clone(),
         credential_home: config.credential_home.clone(),
         agent_session_id: session.map(str::to_string),
+        instructions: config.instructions.clone(),
     };
     let attempt = run_one_attempt(
         store,

@@ -84,6 +84,8 @@ fn drive(world: &World, scenario: &Path) -> Result<conductor_run::vertical::Vert
         probe_key: conductor_run::containment::cache::ProbeKey::new(
             "fake", "test", "none", "n/a", "unprobed",
         ),
+        // The worker derives §6.5's implementation packet — this is not a repair.
+        instructions: None,
     };
     run_task(&mut store, &adapter, &config, &mut ())
 }

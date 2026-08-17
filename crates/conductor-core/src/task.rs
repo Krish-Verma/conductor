@@ -1,4 +1,19 @@
-//! §5.2's task machine, and S5's minimal task spec.
+//! §5.2's task machine.
+//!
+//! # What used to be here as well, and where it went (S12)
+//!
+//! This module also held `TaskSpec`, `ValidatedTaskSpec` and `TaskSpecError` —
+//! S5's minimal task-spec file, whose own doc comment said "S11 replaces this
+//! entirely with `.conductor/plans/vN/plan.yaml`". S11 built the plan ledger and
+//! left the spec in place, and S12 found the consequence: `conductor task run`
+//! was still reading `.conductor/task.yaml`, so §4.3's approval gate never ran
+//! on the product path and the four task columns §4.2/§4.3 compare against were
+//! `NULL` on every real run. Two authorities for "what is a task" is one too
+//! many, so the spec is gone rather than merely unused; `conductor_run::plan`
+//! owns the question, and `conductor_run::plan::model::Task` is the type.
+//!
+//! Nothing below changed with it. The legality table is load-bearing for a
+//! different guarantee, described next, and it never depended on the spec.
 //!
 //! # The legality table is the task's half of one guarantee
 //!
@@ -51,9 +66,8 @@
 //! under v3", so a task that has started work cannot be superseded out from
 //! under itself.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-use crate::ids::{IdError, TaskId};
 use crate::state::TaskState;
 
 /// A transition §5.2 does not draw.
@@ -174,135 +188,5 @@ impl TaskState {
         } else {
             Err(TransitionError { from: *self, to })
         }
-    }
-}
-
-/// Why a task spec is unusable.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum TaskSpecError {
-    /// `id` is not a usable identifier.
-    #[error("task id: {0}")]
-    Id(#[from] IdError),
-    /// `objective` is blank.
-    #[error("the task has no objective, so nothing tells the agent what to do")]
-    NoObjective,
-    /// `scope` is empty.
-    #[error(
-        "the task declares no scope globs; every change would be out of scope, \
-         and a reader cannot tell that from 'everything is permitted'"
-    )]
-    EmptyScope,
-    /// `verification_profile` is blank.
-    #[error(
-        "the task names no verification profile; §4.5 makes verification \
-         authoritative, and a task with no checks completes on the agent's word"
-    )]
-    NoVerificationProfile,
-    /// `attempt_budget` is not positive.
-    #[error("the attempt budget must be at least 1")]
-    ZeroAttemptBudget,
-}
-
-/// S5's minimal task-spec file — **not** the plan ledger.
-///
-/// § Part 8's S5 scope says "minimal task-spec file (not yet the plan ledger)".
-/// S11 replaces this entirely with `.conductor/plans/vN/plan.yaml`, so it
-/// carries exactly what a run needs and nothing that would have to be migrated:
-/// who the task is, what it is for, what it may touch, what proves it, and how
-/// many tries it gets.
-///
-/// Deliberately absent: which adapter runs it (§3.1 puts that in
-/// `project.yaml`), plan version (S11), policy (S7), approvals (S8),
-/// dependencies and acceptance-criterion bindings (S11 — and inventing a
-/// half-version of those here is exactly what would have to be unpicked).
-///
-/// **No `deny_unknown_fields`.** A spec written for a later Conductor must still
-/// load; the fields it does not know about are the later Conductor's business.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskSpec {
-    /// `task.id` — `T-0012`.
-    pub id: String,
-    /// What the task is for. Reaches the agent, and the reviewer.
-    #[serde(default)]
-    pub objective: String,
-    /// `task.scope_globs` (§4.8's scope argument).
-    #[serde(default)]
-    pub scope: Vec<String>,
-    /// `task.verification_profile` — a path, relative to the repository root.
-    #[serde(default)]
-    pub verification_profile: String,
-    /// `task.attempt_budget`. Part 5.1's column defaults to 3.
-    #[serde(default = "default_attempt_budget")]
-    pub attempt_budget: i64,
-}
-
-fn default_attempt_budget() -> i64 {
-    3
-}
-
-/// A [`TaskSpec`] that has been checked.
-///
-/// Separate type, private fields: everything downstream takes this rather than
-/// the raw spec, so "was it validated?" is answered by the type rather than by
-/// remembering to call a function.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ValidatedTaskSpec {
-    id: TaskId,
-    objective: String,
-    scope: Vec<String>,
-    verification_profile: String,
-    attempt_budget: i64,
-}
-
-impl TaskSpec {
-    /// Check the spec. The only way to obtain a [`ValidatedTaskSpec`].
-    pub fn validate(&self) -> Result<ValidatedTaskSpec, TaskSpecError> {
-        let id = TaskId::new(self.id.trim())?;
-        if self.objective.trim().is_empty() {
-            return Err(TaskSpecError::NoObjective);
-        }
-        if self.scope.iter().all(|glob| glob.trim().is_empty()) {
-            return Err(TaskSpecError::EmptyScope);
-        }
-        if self.verification_profile.trim().is_empty() {
-            return Err(TaskSpecError::NoVerificationProfile);
-        }
-        if self.attempt_budget < 1 {
-            return Err(TaskSpecError::ZeroAttemptBudget);
-        }
-        Ok(ValidatedTaskSpec {
-            id,
-            objective: self.objective.trim().to_string(),
-            scope: self.scope.clone(),
-            verification_profile: self.verification_profile.trim().to_string(),
-            attempt_budget: self.attempt_budget,
-        })
-    }
-}
-
-impl ValidatedTaskSpec {
-    /// `task.id`.
-    pub fn id(&self) -> &TaskId {
-        &self.id
-    }
-
-    /// What the task is for.
-    pub fn objective(&self) -> &str {
-        &self.objective
-    }
-
-    /// `task.scope_globs`.
-    pub fn scope(&self) -> &[String] {
-        &self.scope
-    }
-
-    /// Where the verification profile lives, relative to the repository root.
-    pub fn verification_profile(&self) -> &str {
-        &self.verification_profile
-    }
-
-    /// How many attempts the task gets.
-    pub fn attempt_budget(&self) -> i64 {
-        self.attempt_budget
     }
 }

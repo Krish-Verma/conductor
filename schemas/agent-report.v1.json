@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agent-report.v1",
+  "title": "Conductor agent report, version 1",
+  "$comment": "Master plan §6.5 and §4.8. THE REPORT IS EVIDENCE, NEVER AUTHORITY: `claim: COMPLETE` with `reconcile() == NO_CHANGE` is CONTRADICTED and a finding (acceptance row 6). This schema exists to make that contradiction machine-detectable, not to be believed. It is the single source for the shape — `conductor_agent::codex::REPORT_SCHEMA_JSON` is this file, via include_str!, so the two cannot drift. Parsed by `conductor_core::report::AgentReport`, which deliberately has no deny_unknown_fields (§2.2: never on anything an agent produced), so a field added by a later Conductor still loads here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["claim", "files_touched", "summary"],
+  "properties": {
+    "claim": {
+      "type": "string",
+      "enum": ["COMPLETE", "PARTIAL", "FAILED"],
+      "description": "COMPLETE only if the task is finished; PARTIAL if progress was made but work remains; FAILED if the task could not be done.",
+      "$comment": "§6.5's prose spells these `complete | partial | blocked`. `FAILED` ships instead of `blocked` deliberately: `BLOCKED` is one of §5.2's twelve task states, reached only by Conductor's own eligibility refusal (acceptance row 30), and letting an agent put itself there would conflate a claim with a state Conductor alone may write."
+    },
+    "files_touched": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Every file created, modified or deleted, as a path relative to the workspace root.",
+      "$comment": "§6.5 calls this `files_changed`. Named `files_touched` here because it is a claim, not an observation: §4.8 reads the changed set out of git, and a name matching git's would invite reading this as the answer."
+    },
+    "summary": {
+      "type": "string",
+      "description": "One paragraph describing what was changed and why."
+    }
+  }
+}

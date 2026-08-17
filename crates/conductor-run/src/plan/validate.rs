@@ -82,6 +82,36 @@
 //!   silently read as "nothing is gated". A plan carrying an override that
 //!   would refuse every launch through that path is caught here instead,
 //!   while a human can still read the file.
+//!
+//! # Two more §3.7 does not name, inherited from the task spec S12 deleted
+//!
+//! S5's `.conductor/task.yaml` had five refusals of its own, and S12 deleted
+//! the type that held them when `conductor task run` moved onto the plan ledger
+//! (ADR-0017). Three of the five had no successor. Two are restored here,
+//! because a plan is now the *only* document that answers "what is a task?" and
+//! the failures they prevent are still reachable:
+//!
+//! * [`blank_objective`] — the spec's reason was *"the objective is the only
+//!   thing in the file that tells an agent what to do"*, and S10 measured the
+//!   consequence: `codex exec` with no prompt argument **blocks forever reading
+//!   stdin**, so `CodexAgent::command` refuses an empty prompt. Without this
+//!   rule, a plan with a blank objective is approved, its tasks are
+//!   materialized, a workspace is cloned — and *then* the launch is refused.
+//!   Fail-closed, and expensively late. §3.7's whole philosophy is to refuse the
+//!   plan rather than the run.
+//! * [`non_positive_attempt_budget`] — §5.1's column defaults to 3 and §4.6
+//!   bounds repair by it. `attempt_budget: 0` is a task that can never launch,
+//!   which is a stall no state in §5.2 explains.
+//!
+//! **The third is deliberately not restored.** The spec refused an empty
+//! `scope`, and that refusal *does* have a successor: `conductor_git`'s
+//! `Scope::contains` is explicit that it "fails closed — an empty scope contains
+//! nothing, so a task that forgot to declare one halts for review rather than
+//! authorising everything", and a task that declares no scope inherits
+//! `project.yaml`'s `scope_defaults` before it ever gets there. Adding a rule
+//! here would be a second gate on a question already answered safely, and §3.7's
+//! own version of it — "scope globs matching no path" — needs a working tree and
+//! stays deferred.
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
@@ -217,6 +247,26 @@ pub enum PlanDefect {
         /// The parser's complaint, or why an empty result is dangerous here.
         detail: String,
     },
+    /// A task declares no objective.
+    ///
+    /// Not a §3.7 rule — see this module's docs. Inherited from the task spec
+    /// S12 deleted: the objective is the only field that tells an agent what to
+    /// do, and S10 measured that `codex exec` given no prompt blocks forever on
+    /// stdin, so the launch refuses it — after a workspace has been cloned.
+    BlankObjective {
+        /// The task.
+        task: String,
+    },
+    /// A task's `attempt_budget` is not at least 1.
+    ///
+    /// Not a §3.7 rule — see this module's docs. §4.6 bounds repair by this
+    /// number, and a task that is allowed zero attempts can never launch.
+    NonPositiveAttemptBudget {
+        /// The task.
+        task: String,
+        /// What it declared.
+        budget: i64,
+    },
 }
 
 impl PlanDefect {
@@ -233,6 +283,8 @@ impl PlanDefect {
             PlanDefect::UnboundCriterion { .. } => "unbound_criterion",
             PlanDefect::EmptyAction { .. } => "empty_action",
             PlanDefect::MalformedExecutionRequirements { .. } => "malformed_execution_requirements",
+            PlanDefect::BlankObjective { .. } => "blank_objective",
+            PlanDefect::NonPositiveAttemptBudget { .. } => "non_positive_attempt_budget",
         }
     }
 
@@ -248,6 +300,8 @@ impl PlanDefect {
             PlanDefect::UnboundCriterion { criterion, .. } => criterion.clone(),
             PlanDefect::EmptyAction { location, .. } => location.clone(),
             PlanDefect::MalformedExecutionRequirements { task, .. } => task.clone(),
+            PlanDefect::BlankObjective { task } => task.clone(),
+            PlanDefect::NonPositiveAttemptBudget { task, .. } => task.clone(),
         }
     }
 }
@@ -326,6 +380,21 @@ impl fmt::Display for PlanDefect {
                  requirements\", because that is what a mis-nested override looks \
                  like — fix the block, or remove it"
             ),
+            PlanDefect::BlankObjective { task } => write!(
+                f,
+                "task {task:?} declares no objective; it is the only field that \
+                 tells an agent what to do, and an empty one is refused here \
+                 rather than at launch — `codex exec` given no prompt blocks \
+                 forever reading stdin (measured at S10), so the alternative is \
+                 cloning a workspace and then discovering it"
+            ),
+            PlanDefect::NonPositiveAttemptBudget { task, budget } => write!(
+                f,
+                "task {task:?} declares attempt_budget {budget}; §4.6 bounds \
+                 repair by this number and §5.1's column defaults to 3, so a \
+                 task allowed fewer than one attempt can never launch — which is \
+                 a stall no state in §5.2 explains"
+            ),
         }
     }
 }
@@ -375,10 +444,11 @@ pub struct ManualCriterion {
 
 /// A plan that passed §3.7.
 ///
-/// Separate type with private fields, following `conductor_core`'s
-/// `ValidatedTaskSpec`: everything downstream takes this rather than a raw
-/// [`Plan`], so "was it validated?" is answered by the type rather than by
-/// remembering to call a function.
+/// Separate type with private fields: everything downstream takes this rather
+/// than a raw [`Plan`], so "was it validated?" is answered by the type rather
+/// than by remembering to call a function. S5's validated task spec used the same
+/// discipline and S12 deleted it with the rest of the spec; the discipline
+/// outlived it, and [`super::project::Project`] applies it to `config_hash` too.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedPlan {
     plan: Plan,
@@ -453,6 +523,8 @@ const RULES: &[Rule] = &[
     unbound_criteria,
     empty_actions,
     malformed_execution_requirements,
+    blank_objective,
+    non_positive_attempt_budget,
 ];
 
 /// Run §3.7 over a plan.
@@ -769,6 +841,41 @@ fn is_automatically_completable(criterion: &AcceptanceCriterion) -> bool {
 /// `Action::Unknown` and is denied at evaluation by `Action::floor()`; adding
 /// a second refusal for the same thing here would be a gate that can drift
 /// from the one that actually runs.
+/// A task with nothing to tell the agent.
+///
+/// Not §3.7's list — see this module's docs — and inherited from the task spec
+/// S12 deleted. Refused at validate rather than at launch because the launch is
+/// on the far side of a workspace clone.
+fn blank_objective(plan: &Plan, _checks: &BTreeSet<String>, defects: &mut Vec<PlanDefect>) {
+    for task in plan.tasks() {
+        if task.objective.trim().is_empty() {
+            defects.push(PlanDefect::BlankObjective {
+                task: task.id.clone(),
+            });
+        }
+    }
+}
+
+/// A task allowed fewer than one attempt.
+///
+/// Not §3.7's list — see this module's docs. §5.1's column defaults to 3, so
+/// this only fires on a value somebody wrote deliberately, which is exactly the
+/// case worth naming: a `0` here reads as "do not retry" and means "never run".
+fn non_positive_attempt_budget(
+    plan: &Plan,
+    _checks: &BTreeSet<String>,
+    defects: &mut Vec<PlanDefect>,
+) {
+    for task in plan.tasks() {
+        if task.attempt_budget < 1 {
+            defects.push(PlanDefect::NonPositiveAttemptBudget {
+                task: task.id.clone(),
+                budget: task.attempt_budget,
+            });
+        }
+    }
+}
+
 fn empty_actions(plan: &Plan, _checks: &BTreeSet<String>, defects: &mut Vec<PlanDefect>) {
     for task in plan.tasks() {
         for (index, action) in task.actions.iter().enumerate() {
@@ -848,6 +955,7 @@ mod tests {
         let yaml = format!(
             "plan:\n  id: p-x\n  version: 1\n  milestones:\n    - id: M-01\n      \
              slices:\n        - id: S-01\n          tasks:\n            - id: T-0001\n              \
+             objective: \"Do the thing.\"\n              \
              depends_on: {depends_on}\n              acceptance_criteria:\n{criteria}"
         );
         model::parse(&yaml).expect("the unit-test plan parses")
@@ -900,9 +1008,12 @@ mod tests {
         // the cycle detector.
         let yaml = "plan:\n  id: p-x\n  version: 1\n  milestones:\n    - id: M-01\n      \
                     slices:\n        - id: S-01\n          tasks:\n            \
-                    - id: T-0003\n              depends_on: []\n            \
-                    - id: T-0002\n              depends_on: [T-0003]\n            \
-                    - id: T-0001\n              depends_on: [T-0002, T-0003]\n";
+                    - id: T-0003\n              objective: \"Third.\"\n              \
+                    depends_on: []\n            \
+                    - id: T-0002\n              objective: \"Second.\"\n              \
+                    depends_on: [T-0003]\n            \
+                    - id: T-0001\n              objective: \"First.\"\n              \
+                    depends_on: [T-0002, T-0003]\n";
         let plan = model::parse(yaml).expect("parses");
         assert!(
             validate(&plan, &BTreeSet::new()).is_ok(),
@@ -922,12 +1033,16 @@ mod tests {
         // rather than orderings, and that is a different and much worse rule.
         let forward = "plan:\n  id: p-x\n  version: 1\n  milestones:\n    - id: M-01\n      \
                        slices:\n        - id: S-01\n          tasks:\n            \
-                       - id: T-0001\n              depends_on: [T-0002]\n            \
-                       - id: T-0002\n              depends_on: []\n";
+                       - id: T-0001\n              objective: \"First.\"\n              \
+                       depends_on: [T-0002]\n            \
+                       - id: T-0002\n              objective: \"Second.\"\n              \
+                       depends_on: []\n";
         let backward = "plan:\n  id: p-x\n  version: 1\n  milestones:\n    - id: M-01\n      \
                         slices:\n        - id: S-01\n          tasks:\n            \
-                        - id: T-0002\n              depends_on: []\n            \
-                        - id: T-0001\n              depends_on: [T-0002]\n";
+                        - id: T-0002\n              objective: \"Second.\"\n              \
+                        depends_on: []\n            \
+                        - id: T-0001\n              objective: \"First.\"\n              \
+                        depends_on: [T-0002]\n";
 
         let refused = validate(&model::parse(forward).expect("parses"), &BTreeSet::new())
             .expect_err("a forward dependency is refused");
@@ -950,10 +1065,95 @@ mod tests {
     fn plan_with_task_extra(extra: &str) -> Plan {
         let yaml = format!(
             "plan:\n  id: p-x\n  version: 1\n  milestones:\n    - id: M-01\n      \
-             slices:\n        - id: S-01\n          tasks:\n            - id: T-0001\n\
+             slices:\n        - id: S-01\n          tasks:\n            - id: T-0001\n              \
+             objective: \"Do the thing.\"\n\
              {extra}              acceptance_criteria:\n{BOUND}"
         );
         model::parse(&yaml).expect("the unit-test plan parses")
+    }
+
+    /// The same one-task plan with an objective the caller chooses, so that
+    /// "blank" can be tested without a duplicate YAML key.
+    fn plan_with_objective(objective: &str) -> Plan {
+        let yaml = format!(
+            "plan:\n  id: p-x\n  version: 1\n  milestones:\n    - id: M-01\n      \
+             slices:\n        - id: S-01\n          tasks:\n            - id: T-0001\n              \
+             objective: {objective}\n              acceptance_criteria:\n{BOUND}"
+        );
+        model::parse(&yaml).expect("the unit-test plan parses")
+    }
+
+    // -----------------------------------------------------------------------
+    // S12 — the two refusals inherited from the deleted task spec (ADR-0017)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_task_with_no_objective_is_refused_and_names_itself() {
+        // The failure this prevents is not a wrong answer, it is a wasted one:
+        // without it the plan is approved, the task is materialized, a workspace
+        // is cloned, and only then does `CodexAgent::command` refuse the empty
+        // prompt — because S10 measured that `codex exec` with no prompt argument
+        // blocks forever reading stdin.
+        let plan = plan_with_objective("\"   \"");
+        let report = validate(&plan, &checks()).expect_err("refused");
+        assert_eq!(report.defects()[0].kind(), "blank_objective");
+        assert!(
+            report.to_string().contains("T-0001"),
+            "the refusal must name the task: {report}"
+        );
+    }
+
+    #[test]
+    fn a_task_that_declares_an_objective_validates() {
+        // POSITIVE CONTROL. Without it, "a blank objective is refused" is
+        // satisfied by a rule that refuses every objective.
+        let plan = plan_with_objective("\"Do the thing.\"");
+        assert!(validate(&plan, &checks()).is_ok());
+    }
+
+    #[test]
+    fn a_task_allowed_fewer_than_one_attempt_is_refused() {
+        // §5.1's column defaults to 3, so this can only be a value somebody
+        // wrote. `0` reads as "do not retry" and means "never run".
+        let plan = plan_with_task_extra("              attempt_budget: 0\n");
+        let report = validate(&plan, &checks()).expect_err("refused");
+        assert_eq!(report.defects()[0].kind(), "non_positive_attempt_budget");
+    }
+
+    #[test]
+    fn the_default_attempt_budget_validates() {
+        // POSITIVE CONTROL, and it asserts the default is the one §5.1 names: a
+        // rule reading an absent field as `0` would refuse every plan that does
+        // not spell the budget out.
+        let plan = plan_with_task_extra("");
+        assert_eq!(
+            plan.tasks().next().expect("a task").attempt_budget,
+            3,
+            "§5.1's column defaults to 3"
+        );
+        assert!(validate(&plan, &checks()).is_ok());
+    }
+
+    #[test]
+    fn a_task_that_declares_no_scope_is_not_refused_here() {
+        // The third of the deleted spec's refusals, deliberately **not**
+        // restored. `conductor_git::Scope::contains` fails closed on an empty
+        // scope — "a task that forgot to declare one halts for review rather
+        // than authorising everything" — and `project.yaml`'s `scope_defaults`
+        // are inherited before it gets there. A rule here would be a second gate
+        // on a question already answered safely. Asserted rather than left
+        // implicit, so that adding one later is a deliberate reversal.
+        let plan = plan_with_task_extra("");
+        assert!(
+            plan.tasks()
+                .next()
+                .expect("a task")
+                .scope
+                .allowed_globs
+                .is_empty(),
+            "the fixture must declare no scope for this to mean anything"
+        );
+        assert!(validate(&plan, &checks()).is_ok());
     }
 
     #[test]
@@ -1042,6 +1242,6 @@ mod tests {
     fn the_rule_table_holds_every_defect_kind_the_module_can_produce() {
         // A rule that is written but never listed in `RULES` is a rule that
         // does not run, and nothing else would notice.
-        assert_eq!(RULES.len(), 9);
+        assert_eq!(RULES.len(), 11);
     }
 }

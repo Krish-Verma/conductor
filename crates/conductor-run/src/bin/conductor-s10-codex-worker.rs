@@ -101,14 +101,14 @@ fn main() {
     std::fs::create_dir_all(schema_path.parent().expect("a parent")).expect("artifact dir");
     std::fs::write(&schema_path, REPORT_SCHEMA_JSON).expect("write the report schema");
 
+    // `--prompt` is gone since S12: the instruction is §6.5's packet, which the
+    // worker builds from the run's approved plan. A flag that could override it
+    // would be a second answer to "what is this task?", which is the whole of
+    // ADR-0017's finding.
     let adapter = CodexAgent::new(
         PathBuf::from(required(&args, "--codex")),
         workspace,
         schema_path,
-    )
-    .with_prompt(
-        flag(&args, "--prompt")
-            .unwrap_or_else(|| "Add a function named double to lib.rs.".to_string()),
     );
 
     let config = WorkerConfig {
@@ -141,6 +141,9 @@ fn main() {
         credential_home: None,
         // One attempt; §4.6's session policy is repair's.
         agent_session_id: None,
+        // The worker derives §6.5's implementation packet from the run's approved
+        // plan. This harness drives one attempt, never a repair.
+        instructions: None,
     };
 
     let Some(claimed) = store

@@ -232,7 +232,7 @@ impl ContinuationPacket {
 
     /// The packet as YAML — what the next agent is handed.
     pub fn to_yaml(&self) -> String {
-        serde_yaml::to_string(&self.to_value()).unwrap_or_default()
+        serde_yaml::to_string(&super::render(&self.to_value())).unwrap_or_default()
     }
 }
 

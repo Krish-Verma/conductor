@@ -1,4 +1,4 @@
-//! §5.2's task machine and S5's minimal task spec.
+//! §5.2's task machine.
 //!
 //! The property that matters most here is the one §5.2 states as an **invalid**
 //! transition: `RUNNING → COMPLETE`. S3 made that unrepresentable for a *run* by
@@ -7,9 +7,39 @@
 //! carry a token only the completion gate can mint. Neither of those covers the
 //! `task` row, which is a second place the same lie can be written — so the
 //! legality table below is the task's half of the same guarantee.
+//!
+//! # The spec tests that used to be at the bottom of this file (S12)
+//!
+//! This file also exercised `TaskSpec`, S5's minimal `.conductor/task.yaml`, and
+//! its five refusals. That type was the stopgap Part 8's S5 scope called a
+//! "minimal task-spec file (not yet the plan ledger)", and S12 deleted it when
+//! `conductor task run` finally moved onto the plan ledger — until then, two
+//! files claimed to define what a task is and the command read the wrong one.
+//!
+//! The refusals moved unevenly, and a reader looking for the spec's coverage
+//! deserves the exact map rather than a reassurance:
+//!
+//! * **A blank task id** and **an acceptance criterion bound to no check** are
+//!   §3.7's, asserted in `crates/conductor-run/tests/plan_validate.rs` by
+//!   `a_blank_task_id_is_refused_because_it_addresses_nothing` and
+//!   `an_acceptance_criterion_bound_to_nothing_is_a_hard_error_and_not_a_warning`.
+//! * **A verification profile that is not there** moved to the *verb*, not the
+//!   validator: §4.5's clarification 3 settles the field as a path relative to
+//!   the repository root, and only `task run` holds that root. It is asserted in
+//!   `crates/conductor-cli/tests/task.rs` by
+//!   `a_task_naming_a_verification_profile_that_is_not_there_is_refused_before_anything_runs`.
+//! * **A blank objective**, **an empty scope** and **a zero attempt budget** have
+//!   no successor. `plan::validate` refuses none of the three, and
+//!   `plan::model::Task` gives all three a `serde` default rather than requiring
+//!   them, so a plan can declare a task with no objective and validate. §3.7's
+//!   nearest rule — "scope globs matching no path" — is a *different* rule and is
+//!   deliberately deferred (see `plan`'s module docs: it needs a working tree).
+//!   This is a gap the deletion *exposed* rather than created: the spec's version
+//!   of it stopped being reachable the moment `task run` stopped reading the spec.
+//!   It is recorded here rather than closed in a slice that does not own §3.7.
 
 use conductor_core::TaskState;
-use conductor_core::task::{TaskSpec, TaskSpecError, TransitionError};
+use conductor_core::task::TransitionError;
 
 #[test]
 fn running_cannot_reach_complete_without_reconciling() {
@@ -132,98 +162,5 @@ fn a_state_never_transitions_to_itself() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The task spec (S5's minimal file — S11 replaces it with the plan ledger).
-// ---------------------------------------------------------------------------
-
-fn valid_spec() -> TaskSpec {
-    TaskSpec {
-        id: "T-0012".to_string(),
-        objective: "Add a greeting helper".to_string(),
-        scope: vec!["src/**".to_string()],
-        verification_profile: "verification.yaml".to_string(),
-        attempt_budget: 3,
-    }
-}
-
-#[test]
-fn a_valid_spec_carries_exactly_what_a_run_needs() {
-    let spec = valid_spec();
-    let validated = spec.validate().expect("valid");
-    assert_eq!(validated.id().as_str(), "T-0012");
-    assert_eq!(validated.scope(), ["src/**"]);
-    assert_eq!(validated.attempt_budget(), 3);
-    assert_eq!(validated.verification_profile(), "verification.yaml");
-}
-
-#[test]
-fn a_spec_with_no_scope_is_refused() {
-    // An empty scope glob list makes every change out of scope, so nothing could
-    // ever reconcile clean — but worse, a *missing* scope is indistinguishable
-    // from "everything is permitted" to a reader. §3.7's `plan validate` refuses
-    // "scope globs matching no path" for the same reason; this is the smallest
-    // version of that rule the slice can hold.
-    let spec = TaskSpec {
-        scope: Vec::new(),
-        ..valid_spec()
-    };
-    assert_eq!(
-        spec.validate().expect_err("must be refused"),
-        TaskSpecError::EmptyScope
-    );
-}
-
-#[test]
-fn a_spec_with_no_attempt_budget_is_refused() {
-    let spec = TaskSpec {
-        attempt_budget: 0,
-        ..valid_spec()
-    };
-    assert_eq!(
-        spec.validate().expect_err("must be refused"),
-        TaskSpecError::ZeroAttemptBudget
-    );
-}
-
-#[test]
-fn a_spec_with_no_verification_profile_is_refused() {
-    // §3.7: "**any acceptance criterion not bound to at least one check**" is
-    // what `plan validate` refuses hardest, because an unbound criterion is "the
-    // mechanism by which a task reaches `COMPLETE` on an agent's word". A task
-    // with no verification profile at all is that mechanism in its purest form.
-    let spec = TaskSpec {
-        verification_profile: "  ".to_string(),
-        ..valid_spec()
-    };
-    assert_eq!(
-        spec.validate().expect_err("must be refused"),
-        TaskSpecError::NoVerificationProfile
-    );
-}
-
-#[test]
-fn a_spec_with_no_objective_is_refused() {
-    // The objective is the only thing in the file that tells an agent what to
-    // do. A blank one produces an attempt that cannot succeed and a review
-    // packet that cannot be judged.
-    let spec = TaskSpec {
-        objective: String::new(),
-        ..valid_spec()
-    };
-    assert_eq!(
-        spec.validate().expect_err("must be refused"),
-        TaskSpecError::NoObjective
-    );
-}
-
-#[test]
-fn a_spec_with_an_unusable_id_is_refused() {
-    let spec = TaskSpec {
-        id: "  ".to_string(),
-        ..valid_spec()
-    };
-    assert!(matches!(
-        spec.validate().expect_err("must be refused"),
-        TaskSpecError::Id(_)
-    ));
-}
+// The task-spec tests that stood here were deleted at S12 along with the type
+// they exercised. See this file's module docs for where their subject went.

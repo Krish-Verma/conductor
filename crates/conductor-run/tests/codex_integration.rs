@@ -63,7 +63,9 @@ use conductor_run::worker::RunPoint;
 use conductor_store::{NewRun, NewTask, Store};
 
 use common::agent::{POLICY_HASH, git, head};
-use common::vertical::{RUN, RUN_BRANCH, TARGET_BRANCH, TASK, commits_above, seed_parents};
+use common::vertical::{
+    RUN, RUN_BRANCH, TARGET_BRANCH, TASK, commits_above, seed_parents_with_objective,
+};
 
 /// The replay process: `codex exec` on the wire, a recording underneath.
 /// The recorded-Codex binary.
@@ -284,7 +286,11 @@ impl World {
         let base_commit = head(&source);
 
         let mut store = Store::open_or_create(root.join("conductor.db")).expect("store");
-        seed_parents(&mut store);
+        // The plan's task objective is [`PROMPT`], because since S12 the agent is
+        // told what §6.5's packet says — and this file's real-agent test asserts
+        // on the `double` function that prompt asks for. A fixture whose plan said
+        // something else would ask the agent for one thing and check for another.
+        seed_parents_with_objective(&mut store, &source, PROMPT);
         store
             .create_task(
                 &NewTask {
@@ -292,7 +298,7 @@ impl World {
                     plan_version_id: "pv-1".to_string(),
                     slice_id: "S10".to_string(),
                     scope_globs: SCOPE.iter().map(|s| s.to_string()).collect(),
-                    verification_profile: "verification.yaml".to_string(),
+                    verification_profile: ".conductor/verification.yaml".to_string(),
                     attempt_budget: 3,
                 },
                 0,
@@ -1213,7 +1219,10 @@ fn a_real_codex_completes_one_slice_of_real_work_on_a_fixture_repo() {
     let schema = world.root().join("report-schema.json");
     std::fs::write(&schema, REPORT_SCHEMA_JSON).expect("the caller writes the schema (§6.1)");
 
-    let adapter = CodexAgent::new(codex_binary(), world.workspace(), schema).with_prompt(PROMPT);
+    // No prompt here since S12: §6.5's packet is what the agent is told, and the
+    // worker builds it from the plan the fixture approved — whose task objective
+    // **is** [`PROMPT`], so this test still asks for the `double` it asserts on.
+    let adapter = CodexAgent::new(codex_binary(), world.workspace(), schema);
 
     let mut extra = BTreeMap::new();
     // §4.9's last clause, by name and nothing else. See `codex_home`.
@@ -1255,6 +1264,9 @@ fn a_real_codex_completes_one_slice_of_real_work_on_a_fixture_repo() {
         // compares an empty vector and proceeds without consulting the cache.
         // The key is still named honestly: if a later fixture *does* declare a
         // requirement this misses the cache, and a miss is `fail_closed()`.
+        // The worker derives §6.5's implementation packet from the fixture's
+        // approved plan, whose task objective is `PROMPT`.
+        instructions: None,
         probe_key: conductor_run::containment::cache::ProbeKey::new(
             "codex",
             "s10-integration",

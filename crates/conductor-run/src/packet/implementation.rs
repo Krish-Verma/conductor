@@ -56,9 +56,26 @@ use crate::verify::profile;
 /// looking at cannot safely parse either.
 pub const PACKET_VERSION: u32 = 1;
 
-/// Where the agent report schema lives, relative to the run's artifacts —
-/// §6.5's `report_schema`.
-pub const REPORT_SCHEMA_PATH: &str = "schemas/agent-report.v1.json";
+/// Which report shape the packet's reader is held to — §6.5's `report_schema`.
+///
+/// # Why this is an identifier and not a path (corrected at S12)
+///
+/// §6.5's example writes `report_schema: schemas/agent-report.v1.json`, which
+/// reads like a path, and this constant used to be exactly that string. It could
+/// not resolve for anybody. A packet is generated for **the user's** project, so a
+/// repository-relative path resolves against *their* tree, where no such file
+/// exists — while the schema an agent is actually held to is the one the launch
+/// path writes into the run's artifact tree and passes to `codex exec
+/// --output-schema`. So the field named a file the reader could not open, which is
+/// the same failure ADR-0016 refuses for an unresolvable decision ref, in a field
+/// nobody would have thought to check.
+///
+/// It is therefore a **version identifier**: the `$id` of
+/// `schemas/agent-report.v1.json`, which is Conductor's own repository-tracked
+/// artifact and the single source for the shape (`REPORT_SCHEMA_JSON` includes
+/// it). Handing the agent the file is the adapter mechanism's job, and a path
+/// belongs there.
+pub const REPORT_SCHEMA_ID: &str = "agent-report.v1";
 
 /// One decision, as it travels.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,7 +271,7 @@ impl ImplementationPacket {
                 Value::Sequence(self.evidence.iter().map(Evidence::to_value).collect()),
             );
         }
-        put("report_schema", Value::from(REPORT_SCHEMA_PATH));
+        put("report_schema", Value::from(REPORT_SCHEMA_ID));
 
         Value::Mapping(m)
     }
@@ -287,7 +304,7 @@ impl ImplementationPacket {
     /// Rendered from the same [`Value`] the hash covers, so what a reader sees
     /// and what the digest names cannot drift apart.
     pub fn to_yaml(&self) -> String {
-        serde_yaml::to_string(&self.to_value()).unwrap_or_default()
+        serde_yaml::to_string(&super::render(&self.to_value())).unwrap_or_default()
     }
 }
 
