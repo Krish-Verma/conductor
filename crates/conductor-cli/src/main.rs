@@ -5,8 +5,10 @@
 //! §7.1's "why was this denied — the 2 a.m. command". S8 adds `approval
 //! list|show|approve|deny|revoke` over the control socket of §7.3. S11 adds
 //! `init` — §7.1's first line, and the command `project add` was folded into —
-//! and `plan validate|approve`. The rest of §7.1's thirteen arrive with the
-//! slices that implement them.
+//! and `plan validate|approve`. S13 adds `review export|import` — §6.5's human
+//! review loop, whose import half is mutating and therefore goes over the same
+//! control socket. The rest of §7.1's thirteen arrive with the slices that
+//! implement them.
 
 mod approval;
 mod doctor;
@@ -14,6 +16,7 @@ mod init;
 mod plan;
 mod policy;
 mod recover;
+mod review;
 mod socket;
 mod task;
 
@@ -101,6 +104,16 @@ enum Commands {
     },
     /// Rebuild project truth from `.conductor/` after the store is lost (§3.5).
     Recover(recover::RecoverArgs),
+    /// Export §6.5's review packet, and import a human's decision over the
+    /// control socket.
+    Review {
+        #[command(subcommand)]
+        command: review::ReviewCommand,
+        #[command(flatten)]
+        shared: task::StoreArgs,
+        #[command(flatten)]
+        socket: approval::SocketArgs,
+    },
     /// List, inspect, grant, refuse and revoke approvals over the control
     /// socket (§4.3, §7.3).
     Approval {
@@ -137,6 +150,11 @@ fn main() -> ExitCode {
         Commands::Task { command, shared } => task::run(&command, &shared),
         Commands::Policy { command, shared } => policy::run(&command, &shared),
         Commands::Recover(args) => recover::run(&args),
+        Commands::Review {
+            command,
+            shared,
+            socket,
+        } => review::run(&command, &shared, &socket),
         Commands::Approval {
             command,
             shared,

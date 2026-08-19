@@ -27,6 +27,11 @@ conductor-store.workspace = true
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+# §6.5's review decision is a YAML document `review export` writes and a human
+# edits. Not a new package: `conductor-run` already depends on this exact
+# version for the verification profile (§2.2 authorizes it), so nothing new
+# enters the lock — the same argument the `rusqlite` line above makes.
+serde_yaml = "0.9.34"
 
 [dev-dependencies]
 serde_json = "1.0.151"

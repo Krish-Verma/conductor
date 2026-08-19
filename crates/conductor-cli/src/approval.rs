@@ -540,6 +540,18 @@ fn dispatch(store: &mut Store, request: &RpcRequest, nonce_hash: Option<&str>) -
         "approval.deny" => deny(store, &request.params),
         "approval.revoke" => revoke_grant(store, &request.params),
         "plan.approve" => plan_approve(store, &request.params),
+        // §6.5: "Importing is a **mutating** operation and goes through the
+        // control socket, never a file an agent could write." Served here for
+        // `plan.approve`'s reason — a second dispatcher would be a second door
+        // into the room this one guards. The verb itself lives in
+        // [`crate::review`], which also owns the client that may not touch a
+        // store.
+        "review.import" => {
+            crate::review::import(store, &request.params).map_err(|refusal| Refusal {
+                code: refusal.code,
+                message: refusal.message,
+            })
+        }
         other => Err(Refusal {
             code: rpc_code::METHOD_NOT_FOUND,
             message: format!("no such method {other}"),
@@ -556,7 +568,7 @@ fn dispatch(store: &mut Store, request: &RpcRequest, nonce_hash: Option<&str>) -
 fn mutating(method: &str) -> bool {
     matches!(
         method,
-        "approval.approve" | "approval.deny" | "approval.revoke" | "plan.approve"
+        "approval.approve" | "approval.deny" | "approval.revoke" | "plan.approve" | "review.import"
     )
 }
 
