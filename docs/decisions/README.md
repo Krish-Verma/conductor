@@ -64,6 +64,7 @@ copies of a number are two things that can disagree.
 | [ADR-0016](ADR-0016-context-minimization-had-only-one-implementable-half.md) | §6.5's context minimization had only one implementable half | ACCEPTED |
 | [ADR-0017](ADR-0017-the-core-verb-never-used-the-plan-ledger.md) | The core verb never used the plan ledger | ACCEPTED |
 | [ADR-0018](ADR-0018-the-packets-were-built-and-never-delivered.md) | The packets were built and never delivered | ACCEPTED |
+| [ADR-0019](ADR-0019-the-review-edge-was-drawn-and-unreachable.md) | §5.2's `AWAITING_REVIEW → COMPLETE` edge was drawn and unreachable | ACCEPTED |
 
 *(ADR-0008 through ADR-0014 were absent from this index until S11 — the records
 existed, the table stopped at 0007. Recorded rather than silently fixed: an index

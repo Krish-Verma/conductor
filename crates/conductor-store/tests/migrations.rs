@@ -74,6 +74,10 @@ fn schema_v1_contains_exactly_the_tables_and_indexes_of_part_5_1() {
         // Schema v5 (S6). The assertion stays exhaustive on purpose: a
         // migration that adds a table must be seen here, not absorbed.
         "repair_observation",
+        // Schema v9 (S13). Same rule, same reason: §5.2's review machine and
+        // §6.5's packet finally have a row, and it is named here rather than
+        // absorbed into a set nobody re-reads.
+        "review",
         "run",
         "schema_version",
         "side_effect",
@@ -93,6 +97,12 @@ fn schema_v1_contains_exactly_the_tables_and_indexes_of_part_5_1() {
         "ix_event_run",
         "ix_verif_cache",
         "ix_grant_binding",
+        // Schema v9 (S13). `ix_review_one_open_per_run` is the guarantee that a
+        // run cannot have two open reviews and therefore two packet hashes a
+        // decision could choose between; if this migration ever ships without it
+        // the refusal becomes advisory.
+        "ix_review_run",
+        "ix_review_one_open_per_run",
     ] {
         assert!(
             indexes.contains(expected),
@@ -450,6 +460,123 @@ fn migration_8_adds_materialized_plan_columns_and_preserves_v7_rows() {
         store.integrity_check().expect("integrity"),
         vec!["ok".to_string()]
     );
+}
+
+#[test]
+fn migration_9_adds_the_review_table_and_preserves_v8_rows() {
+    // Acceptance criterion: migration 9 applies to a v8 database and preserves
+    // every existing row. Would fail if `SCHEMA_V9` were folded into an earlier
+    // migration, or if it rebuilt a table instead of adding one.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("conductor.db");
+
+    // Build a v8 database and seed the rows a review will point at. Nothing
+    // before S13 could write a review, so there is deliberately no review row
+    // here to migrate.
+    {
+        let mut conn = rusqlite::Connection::open(&path).expect("raw open");
+        conductor_store::schema::apply_pragmas(&conn).expect("pragmas");
+        conductor_store::migrate::apply_up_to(&mut conn, 8).expect("v8 only");
+        assert_eq!(current_version(&conn).expect("version"), Some(8));
+        conn.execute_batch(
+            "INSERT INTO project (id, root_path, repo_identity, default_branch, config_hash, created_at)
+               VALUES ('p-1','/r','blake3:r','main','blake3:c',0);
+             INSERT INTO plan_version (id, project_id, version, content_hash, state, source_path)
+               VALUES ('pv-1','p-1',1,'blake3:p','APPROVED','p.yaml');
+             INSERT INTO policy_snapshot (hash, canonical_blob, created_at)
+               VALUES ('blake3:pol','{}',0);
+             INSERT INTO task (id, plan_version_id, slice_id, state, scope_globs,
+                               verification_profile, attempt_budget, created_at)
+               VALUES ('T-1','pv-1','S1','AWAITING_REVIEW','[\"src/**\"]','default',3,7);
+             INSERT INTO run (id, task_id, policy_hash, base_commit, run_branch, state,
+                              priority, lease_epoch, created_at)
+               VALUES ('r-1','T-1','blake3:pol','abc','conductor/r-1','AWAITING_REVIEW',100,4,9);",
+        )
+        .expect("seed a v8 row");
+    }
+
+    let store = Store::open_or_create(&path).expect("migrate forward");
+    assert_eq!(
+        store.schema_version().expect("version"),
+        Some(conductor_store::schema::SUPPORTED_SCHEMA_VERSION)
+    );
+
+    let mut stmt = store
+        .conn()
+        .prepare("SELECT name FROM pragma_table_info('review') ORDER BY cid")
+        .expect("prepare");
+    let columns: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query")
+        .map(|r| r.expect("row"))
+        .collect();
+    assert_eq!(
+        columns,
+        vec![
+            "id",
+            "run_id",
+            "task_id",
+            "plan_version_id",
+            "boundary",
+            "state",
+            "packet_hash",
+            "packet_path",
+            "decision",
+            "decided_by",
+            "decided_at",
+            "notes",
+            "created_at",
+        ]
+    );
+
+    // The three foreign keys are the reason the row can be trusted to describe
+    // real work: a review of a run that does not exist is not a review.
+    let fk_targets: BTreeSet<String> = store
+        .conn()
+        .prepare("SELECT \"table\" FROM pragma_foreign_key_list('review')")
+        .expect("prepare")
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query")
+        .map(|r| r.expect("row"))
+        .collect();
+    assert_eq!(
+        fk_targets,
+        ["plan_version", "run", "task"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect::<BTreeSet<String>>()
+    );
+
+    // The pre-existing v8 rows survived untouched: this is a forward migration,
+    // not a rewrite.
+    let (task_state, budget, created_at): (String, i64, i64) = store
+        .conn()
+        .query_row(
+            "SELECT state, attempt_budget, created_at FROM task WHERE id='T-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("task survived");
+    assert_eq!(task_state, "AWAITING_REVIEW");
+    assert_eq!(budget, 3);
+    assert_eq!(created_at, 7);
+
+    let (run_state, epoch): (String, i64) = store
+        .conn()
+        .query_row(
+            "SELECT state, lease_epoch FROM run WHERE id='r-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("run survived");
+    assert_eq!(run_state, "AWAITING_REVIEW");
+    assert_eq!(epoch, 4);
+
+    assert_eq!(
+        store.integrity_check().expect("integrity"),
+        vec!["ok".to_string()]
+    );
+    assert_eq!(store.foreign_key_check().expect("fk"), 0);
 }
 
 #[test]

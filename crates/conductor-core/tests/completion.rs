@@ -455,3 +455,102 @@ fn complete_is_the_only_terminal_route_and_it_carries_its_evidence() {
         other => panic!("{other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// S13 — a human accepting a review, and the four things acceptance is not
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_verdict_a_human_accepted_at_review_satisfies_criterion_six() {
+    // §5.2 draws `AWAITING_REVIEW → COMPLETE` and, until S13, nothing could take
+    // that edge: `ReconciledRoute::Complete` carries a token only `evaluate` can
+    // mint, and every verdict that routes a run to `AWAITING_REVIEW` is one
+    // criterion 6 refuses. So the edge was drawn and unreachable, and S13 has to
+    // say what authorizes it.
+    //
+    // The answer is the one criterion 7 already uses for policy: a human
+    // decision, carried as evidence rather than asserted. This variant is the
+    // review equivalent, and like `AuthorizedPolicySensitive` it cannot be
+    // constructed from a verdict alone.
+    let mut evidence = evidence();
+    evidence.reconciliation = ReconciliationEvidence::AcceptedAtReview {
+        verdict: "CONTRADICTED".to_string(),
+        authorization: "AG-review-1".to_string(),
+    };
+
+    let verified = evaluate(&evidence).expect("an accepted review satisfies criterion 6");
+    assert_eq!(verified.tree_hash(), TREE);
+}
+
+#[test]
+fn accepting_a_review_does_not_excuse_a_check_that_did_not_pass() {
+    // The line S13 must not cross. A human accepting the *review boundary* is
+    // not a human overruling verification: §4.5 binds a `PASS` to a tree hash,
+    // and if acceptance could wave that away then "verification is
+    // authoritative" would mean "verification is advisory", which is the one
+    // thing §4.5 may not become. The decisions for a failing check are `repair`,
+    // `revise_plan` and `stop` — not `accept`.
+    let mut evidence = evidence();
+    evidence.reconciliation = ReconciliationEvidence::AcceptedAtReview {
+        verdict: "CONTRADICTED".to_string(),
+        authorization: "AG-review-1".to_string(),
+    };
+    evidence.required = ChecksEvidence::new([CheckEvidence {
+        check_id: "unit-tests".to_string(),
+        outcome: VerificationOutcome::Fail,
+        tree_hash: TREE.to_string(),
+    }]);
+
+    let refusals = evaluate(&evidence).expect_err("a failing required check must still refuse");
+    assert!(
+        refusals
+            .iter()
+            .any(|r| r.criterion == Criterion::RequiredChecks),
+        "the refusal must name the required-checks criterion: {refusals:?}"
+    );
+}
+
+#[test]
+fn accepting_a_review_does_not_excuse_an_unresolved_finding() {
+    // §4.8: findings never auto-resolve. An `accept` that silently swallowed one
+    // would be exactly the auto-resolution that rule forbids, arriving through a
+    // human-shaped door. Acceptance resolves findings by *writing*
+    // `finding.resolution` — a separate, recorded act — and the gate still counts
+    // whatever is left.
+    let mut evidence = evidence();
+    evidence.reconciliation = ReconciliationEvidence::AcceptedAtReview {
+        verdict: "OUT_OF_SCOPE".to_string(),
+        authorization: "AG-review-1".to_string(),
+    };
+    evidence.findings = FindingsEvidence::unresolved(1);
+
+    let refusals = evaluate(&evidence).expect_err("an unresolved finding must still refuse");
+    assert!(
+        refusals
+            .iter()
+            .any(|r| r.criterion == Criterion::NoUnresolvedFindings),
+        "the refusal must name the findings criterion: {refusals:?}"
+    );
+}
+
+#[test]
+fn an_accepted_verdict_is_still_named_honestly_in_the_evidence() {
+    // The verdict is not rewritten to `CLEAN_COMPLETE` by being accepted. A
+    // reader of the durable record has to be able to see that a human accepted
+    // `CONTRADICTED`, because that is a materially different history from a run
+    // that was clean — and §4.8's doctrine is that the measured fact survives the
+    // decision made about it.
+    let accepted = ReconciliationEvidence::AcceptedAtReview {
+        verdict: "CONTRADICTED".to_string(),
+        authorization: "AG-review-1".to_string(),
+    };
+    let rendered = serde_json::to_string(&accepted).expect("serialize");
+    assert!(
+        rendered.contains("CONTRADICTED"),
+        "the accepted verdict must stay visible: {rendered}"
+    );
+    assert!(
+        rendered.contains("AG-review-1"),
+        "and so must what authorized it: {rendered}"
+    );
+}

@@ -122,6 +122,25 @@ impl Diff {
     }
 }
 
+impl serde::Serialize for Diff {
+    /// Delegated to [`Diff::to_value`], so there is exactly one description of a
+    /// diff's shape.
+    ///
+    /// Added at S13 because §6.5's review packet carries a `Diff` inside a struct
+    /// it serializes wholesale, while this module hand-builds its nested mapping.
+    /// Hand-building a second time would have been a second spelling of these
+    /// five optional fields — and the reason `repair` serializes its added type
+    /// instead of re-listing it is that two spellings drift. This impl produces
+    /// byte-identical output to the hand-built path because it *is* the
+    /// hand-built path.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.to_value().serialize(serializer)
+    }
+}
+
 /// What the world looks like now — §6.5's "observed reality".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Observed {

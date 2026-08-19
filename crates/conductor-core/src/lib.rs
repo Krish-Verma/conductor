@@ -17,6 +17,7 @@ pub mod event;
 pub mod fence;
 pub mod ids;
 pub mod report;
+pub mod review;
 pub mod state;
 pub mod task;
 pub mod verification;
@@ -30,8 +31,10 @@ pub use ids::{
     AttemptId, IdError, PlanVersionId, PolicyHash, ProjectId, RunId, TaskId, WorkspaceId,
 };
 pub use report::{AgentReport, ReportClaim};
+pub use review::{ParseReviewDecisionError, ReviewDecision, ReviewTransitionError};
 pub use state::{
-    AttemptOutcome, ParseStateError, PlanVersionState, ReconciledRoute, RunState, TaskState,
+    AttemptOutcome, ParseStateError, PlanVersionState, ReconciledRoute, ReviewOutcome, ReviewState,
+    RunState, TaskState,
 };
 pub use task::TransitionError;
 pub use verification::VerificationOutcome;

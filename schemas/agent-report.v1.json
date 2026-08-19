@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "agent-report.v1",
   "title": "Conductor agent report, version 1",
-  "$comment": "Master plan §6.5 and §4.8. THE REPORT IS EVIDENCE, NEVER AUTHORITY: `claim: COMPLETE` with `reconcile() == NO_CHANGE` is CONTRADICTED and a finding (acceptance row 6). This schema exists to make that contradiction machine-detectable, not to be believed. It is the single source for the shape — `conductor_agent::codex::REPORT_SCHEMA_JSON` is this file, via include_str!, so the two cannot drift. Parsed by `conductor_core::report::AgentReport`, which deliberately has no deny_unknown_fields (§2.2: never on anything an agent produced), so a field added by a later Conductor still loads here.",
+  "$comment": "Master plan §6.5 and §4.8. THE REPORT IS EVIDENCE, NEVER AUTHORITY: `claim: COMPLETE` with `reconcile() == NO_CHANGE` is CONTRADICTED and a finding (acceptance row 6). This schema exists to make that contradiction machine-detectable, not to be believed. It is the single source for the shape — `conductor_agent::codex::REPORT_SCHEMA_JSON` is this file, via include_str!, so the two cannot drift. Parsed by `conductor_core::report::AgentReport`, which deliberately has no deny_unknown_fields (§2.2: never on anything an agent produced), so a field added by a later Conductor still loads here. STILL v1 AT S13: the five review inputs below are additive and optional, so a report written before they existed still validates and a report carrying them still parses on a build that ignores them. A compatible extension is not a new schema, and bumping `$id` would force every adapter to be told about a change that cannot break any of them.",
   "type": "object",
   "additionalProperties": false,
   "required": ["claim", "files_touched", "summary"],
@@ -22,6 +22,41 @@
     "summary": {
       "type": "string",
       "description": "One paragraph describing what was changed and why."
+    },
+    "task_id": {
+      "type": "string",
+      "description": "The task you were given, echoed back.",
+      "$comment": "S13. A cross-check a human reads beside the task Conductor actually launched. Absent and empty are different facts, which is why the Rust field is an Option and this is not in `required`."
+    },
+    "commands_run": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Commands you ran while working on the task.",
+      "$comment": "S13, review input. NOT verification: §4.5's checks are the ones Conductor runs itself, bound to a tree hash. These are a claim, which is why their only consumer is a review packet a human reads and never a completion criterion."
+    },
+    "acceptance_criteria": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Ids of the acceptance criteria you believe you satisfied.",
+      "$comment": "S13, review input. Evidence for the reviewer's side-by-side, never a substitute for criterion 5's binding: a criterion is satisfied by a passing check, not by being named here."
+    },
+    "deviations": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Anywhere you knowingly departed from the plan, and why.",
+      "$comment": "S13, review input, and the most valuable field here for a reviewer: a deviation the agent volunteers is one a human does not have to find in a diff."
+    },
+    "blockers": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Anything that stopped you making further progress.",
+      "$comment": "S13, review input. Distinct from a FAILED claim: an agent can finish PARTIAL and still have hit something a human can clear in a minute."
+    },
+    "unverified_claims": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Statements you are making that nothing checked.",
+      "$comment": "S13, review input. §4.5's `manual: true` escape hatch forces a review boundary for exactly this class of statement; carrying them explicitly means a reviewer sees 'the agent asserts this and nothing checked it' rather than an unqualified summary."
     }
   }
 }

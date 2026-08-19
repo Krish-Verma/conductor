@@ -42,6 +42,22 @@ pub enum EventKind {
     RecoveryDecision,
     /// A finding was raised. Findings never auto-resolve (§4.8).
     FindingRaised,
+    /// A **human** resolved a finding — §4.8's decision path, S13.
+    ///
+    /// Its own kind rather than a second [`EventKind::FindingRaised`] carrying
+    /// `resolved: true`, because §4.8's rule is that findings never auto-resolve:
+    /// the journal has to make "raised" and "a person answered this" different
+    /// events, or an auditor counting `FINDING_RAISED` rows cannot tell one
+    /// finding answered from two findings raised.
+    FindingResolved,
+    /// A review moved state — §5.2's `PENDING → EXPORTED → DECIDED`, S13.
+    ///
+    /// Not [`EventKind::RunStateChanged`]: a review's states are not run states,
+    /// and overloading one kind for two machines means a reader has to inspect the
+    /// payload to know which machine moved. None of `PENDING`, `EXPORTED` or
+    /// `DECIDED` is a spelling any [`RunState`](crate::RunState) uses, so the
+    /// ambiguity would be silent rather than caught.
+    ReviewStateChanged,
     /// A verification check produced a result bound to a tree hash (§4.5).
     VerificationRecorded,
 }
@@ -62,6 +78,8 @@ impl EventKind {
         EventKind::EffectAmbiguous,
         EventKind::RecoveryDecision,
         EventKind::FindingRaised,
+        EventKind::FindingResolved,
+        EventKind::ReviewStateChanged,
         EventKind::VerificationRecorded,
     ];
 
@@ -81,6 +99,8 @@ impl EventKind {
             EventKind::EffectAmbiguous => "EFFECT_AMBIGUOUS",
             EventKind::RecoveryDecision => "RECOVERY_DECISION",
             EventKind::FindingRaised => "FINDING_RAISED",
+            EventKind::FindingResolved => "FINDING_RESOLVED",
+            EventKind::ReviewStateChanged => "REVIEW_STATE_CHANGED",
             EventKind::VerificationRecorded => "VERIFICATION_RECORDED",
         }
     }

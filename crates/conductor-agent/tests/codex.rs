@@ -853,3 +853,56 @@ fn the_published_schema_is_the_report_conductor_actually_parses() {
         serde_json::Value::Bool(false)
     );
 }
+
+#[test]
+fn every_field_the_report_type_carries_is_declared_in_the_closed_schema() {
+    // The drift this guards is one-directional and silent. The schema is
+    // `additionalProperties: false` because Codex's structured output requires a
+    // closed object — so a field added to `AgentReport` in Rust and forgotten
+    // here does not merely go undocumented: **an agent that emits it violates the
+    // schema it was handed**, and the report it worked to produce is rejected for
+    // being too informative.
+    //
+    // Serializing a fully-populated report and checking every key against
+    // `properties` catches that without this test having to be edited each time a
+    // field is added — which is the point, since a guard you must remember to
+    // update is the thing being guarded against.
+    let populated = conductor_core::AgentReport {
+        claim: ReportClaim::Partial,
+        files_touched: vec!["src/lib.rs".to_string()],
+        summary: "s".to_string(),
+        task_id: Some("T-0001".to_string()),
+        commands_run: vec!["cargo test".to_string()],
+        acceptance_criteria: vec!["AC-1".to_string()],
+        deviations: vec!["d".to_string()],
+        blockers: vec!["b".to_string()],
+        unverified_claims: vec!["u".to_string()],
+    };
+    let encoded = serde_json::to_value(&populated).expect("serialize");
+    let object = encoded.as_object().expect("a report is an object");
+
+    let schema: serde_json::Value =
+        serde_json::from_str(REPORT_SCHEMA_JSON).expect("the schema is JSON");
+    let properties = schema["properties"]
+        .as_object()
+        .expect("the schema declares properties");
+
+    for key in object.keys() {
+        assert!(
+            properties.contains_key(key),
+            "`AgentReport` serializes `{key}`, which the closed schema does not \
+             declare — an agent emitting it would be refused for saying too much"
+        );
+    }
+
+    // The other direction, so the schema cannot grow a field nothing parses: a
+    // property an agent is invited to produce and `AgentReport` drops is a field
+    // that reaches a reviewer as absent no matter what the agent wrote.
+    for key in properties.keys() {
+        assert!(
+            object.contains_key(key),
+            "the schema declares `{key}`, which `AgentReport` does not carry — an \
+             agent would fill it in and nothing would read it"
+        );
+    }
+}

@@ -157,6 +157,31 @@ state_enum! {
 }
 
 state_enum! {
+    /// `review.state` — §5.2 *"Review (3 states)"*.
+    ///
+    /// ```text
+    /// PENDING ─export─► EXPORTED ─import─► DECIDED
+    /// ```
+    ///
+    /// Transition rules live in [`crate::review`], for the same reason
+    /// [`TaskState`]'s live in [`crate::task`]: this module decides which strings
+    /// are legal in which column, and nothing else.
+    ///
+    /// `DECIDED` is terminal, and that is load-bearing rather than tidy. §6.5
+    /// makes importing a decision *"a **mutating** operation … never a file an
+    /// agent could write"*, so the import path is somewhere an attacker would
+    /// like to arrive twice — once to have a decision applied and again to have
+    /// a different one applied. A terminal `DECIDED` makes the second arrival a
+    /// refusal instead of a second answer.
+    ReviewState {
+        Pending => "PENDING",
+        Exported => "EXPORTED",
+        Decided => "DECIDED",
+    }
+    terminal: [Decided]
+}
+
+state_enum! {
     /// `attempt.outcome` — Part 5.1 column comment.
     ///
     /// The attempt *state* diagram in §5.2 is not represented here because the
@@ -294,6 +319,78 @@ pub enum ReconciledRoute {
     /// deferred to a later slice, so a `COMPLETE` reached today is explicit
     /// about what it did not check.
     Complete(crate::completion::VerifiedComplete),
+}
+
+/// What a human's review decision writes to `run.state` — §5.2, S13.
+///
+/// # Why this is not `ReconciledRoute`
+///
+/// [`ReconciledRoute`] is what *reconciliation* concluded, and it has no
+/// `Superseded` or `Cancelled` variant because reconciliation never abandons a
+/// task — only a person does. Reusing it would mean adding two variants that no
+/// reconciliation can produce, and then every exhaustive `match` in the
+/// reconciliation path would gain two arms it must declare unreachable. Two
+/// enums, each total over its own domain, is the smaller lie.
+///
+/// # `Accepted` carries the proof, for the same reason `Complete` does
+///
+/// This enum writes `RunState::Complete`, which is the state
+/// [`ReconciledRoute::Complete`] guards with a
+/// [`VerifiedComplete`](crate::completion::VerifiedComplete) that only
+/// [`completion::evaluate`](crate::completion::evaluate) can mint. A review edge
+/// that wrote the same state without the same token would be the one door into
+/// `COMPLETE` needing no evidence — and it would be the door a human is
+/// encouraged to walk through. So `Accepted` carries the token, and ADR-0019
+/// records why acceptance satisfies criterion 6 without excusing the other six.
+///
+/// ```compile_fail
+/// # use conductor_core::{ReviewOutcome, completion::VerifiedComplete};
+/// // `VerifiedComplete` has no public constructor and no public fields.
+/// let _ = ReviewOutcome::Accepted(VerifiedComplete { tree_hash: "t".to_string() });
+/// ```
+///
+/// Non-vacuity control: a variant that certifies nothing needs no evidence and
+/// compiles.
+///
+/// ```
+/// # use conductor_core::{ReviewOutcome, RunState};
+/// assert_eq!(ReviewOutcome::Cancelled.state(), RunState::Cancelled);
+/// ```
+///
+/// **`Deserialize` is deliberately absent**, exactly as it is on
+/// [`ReconciledRoute`]: a decision arrives from a file a human edited, and a
+/// route that could be deserialised would let `{"ACCEPTED": {...}}` in that file
+/// mint a `VerifiedComplete`. What is read out of the human's file is a
+/// [`ReviewDecision`](crate::review::ReviewDecision), which carries no proof at
+/// all; the proof is earned afterwards, on this side, by running the gate.
+///
+/// **There is no `Paused` variant.** Pausing writes no state — see
+/// [`ReviewDecision::task_target`](crate::review::ReviewDecision::task_target).
+/// A variant here would be a state transition for a decision that is
+/// deliberately not one, and a self-transition is refused anyway.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ReviewOutcome {
+    /// A human accepted the work. The payload is the completion proof.
+    Accepted(crate::completion::VerifiedComplete),
+    /// Send it back for a bounded repair attempt.
+    Repairing,
+    /// The plan was wrong; a new version supersedes this task.
+    Superseded,
+    /// Abandon the task.
+    Cancelled,
+}
+
+impl ReviewOutcome {
+    /// The `run.state` this outcome writes.
+    pub fn state(&self) -> RunState {
+        match self {
+            ReviewOutcome::Accepted(_) => RunState::Complete,
+            ReviewOutcome::Repairing => RunState::Repairing,
+            ReviewOutcome::Superseded => RunState::Superseded,
+            ReviewOutcome::Cancelled => RunState::Cancelled,
+        }
+    }
 }
 
 impl ReconciledRoute {

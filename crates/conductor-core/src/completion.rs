@@ -238,6 +238,50 @@ pub enum ReconciliationEvidence {
         /// What authorized it — the grant, or the rule that allowed it.
         authorization: String,
     },
+    /// A verdict a human **accepted at a review boundary** — added at S13.
+    ///
+    /// # Why criterion 6 has to admit this too
+    ///
+    /// §5.2 draws `AWAITING_REVIEW → COMPLETE`, and until S13 nothing could take
+    /// that edge. Every verdict that routes a run to `AWAITING_REVIEW` —
+    /// `CONTRADICTED`, `OUT_OF_SCOPE`, `GOVERNANCE_VIOLATION`, an unresolved
+    /// `POLICY_SENSITIVE` — is a verdict criterion 6 refuses, and
+    /// [`ReconciledRoute::Complete`](crate::ReconciledRoute) carries a token only
+    /// [`evaluate`] can mint. So the edge existed on the diagram and in
+    /// [`crate::TaskState::successors`] while being unreachable in fact, which is
+    /// the same shape of defect ADR-0013 found behind criterion 7 and ADR-0017
+    /// found behind the core verb: a mechanism that is drawn, agreed, and has no
+    /// caller.
+    ///
+    /// The resolution is the one criterion 7 already established for policy — a
+    /// human decision enters the gate as *evidence*, not as an assertion — and
+    /// like [`ReconciliationEvidence::AuthorizedPolicySensitive`] this variant
+    /// cannot be constructed from a verdict alone: the authorizing grant is a
+    /// required field, so "accepted" can only be claimed by a caller that holds
+    /// one.
+    ///
+    /// # What acceptance does not do
+    ///
+    /// It resolves the **review boundary**, not the other six criteria. A human
+    /// accepting a review is not a human overruling verification: criteria 1–3
+    /// still require a `PASS` bound to the current tree, criterion 4 still counts
+    /// findings that no human has resolved, and criterion 7 still wants its
+    /// grants. If acceptance could excuse a failing check, §4.5's *"verification
+    /// is authoritative"* would quietly become *"verification is advisory"* —
+    /// and the decisions that exist for a failing check are `repair`,
+    /// `revise_plan` and `stop`.
+    ///
+    /// The verdict is carried verbatim and is **not** rewritten to a clean one.
+    /// A reader of the durable record must be able to see that a human accepted
+    /// `CONTRADICTED`, because that is a materially different history from a run
+    /// that was clean.
+    AcceptedAtReview {
+        /// The verdict, still named honestly. Never rewritten to a clean one.
+        verdict: String,
+        /// The `approval_grant.id` of the §4.3 `REVIEW_ACCEPTANCE` that
+        /// authorized it.
+        authorization: String,
+    },
     /// Any other verdict.
     NotClean {
         /// The verdict's name, for the refusal message.
@@ -529,6 +573,10 @@ pub fn evaluate(evidence: &CompletionEvidence) -> Result<VerifiedComplete, Vec<R
                 // is unreachable and acceptance rows 12 and 13 authorize
                 // nothing.
                 ReconciliationEvidence::AuthorizedPolicySensitive { .. } => {}
+                // S13. See the variant's documentation: without this arm §5.2's
+                // `AWAITING_REVIEW → COMPLETE` edge is undrawable, and every
+                // review decision except `stop` authorizes nothing.
+                ReconciliationEvidence::AcceptedAtReview { .. } => {}
                 ReconciliationEvidence::NotClean { verdict } => refusals.push(Refusal {
                     criterion: *criterion,
                     detail: format!(

@@ -18,7 +18,7 @@
 //! closes the window at the moment ownership is revoked instead of at the moment
 //! somebody else takes it. `tests/fencing.rs` pins both orderings.
 
-use conductor_core::{EventKind, Fence, RunId, RunState, TerminalAttempt};
+use conductor_core::{EventKind, Fence, ReviewOutcome, RunId, RunState, TerminalAttempt};
 use rusqlite::{Connection, Transaction, params};
 use serde::Serialize;
 
@@ -339,6 +339,82 @@ fn advance_from(
     now_ms: i64,
 ) -> StoreResult<RunState> {
     advance_state(conn, fence, required, route.state(), detail, now_ms)
+}
+
+/// Apply a human's review decision — §5.2's exit from `AWAITING_REVIEW`, S13.
+///
+/// # Why this function had to be written at all
+///
+/// ADR-0019: every route *into* `AWAITING_REVIEW` was built and none out of it.
+/// [`route_reconciled`] requires `RECONCILING`, [`route_verified`] requires
+/// `VERIFYING`, [`reopen_for_repair`] and [`escalate_from_repairing`] require
+/// `REPAIRING`, [`resume_after_grant`] requires `AWAITING_APPROVAL`, and
+/// [`advance_state`] is private. So §5.2 drew four edges out of
+/// `AWAITING_REVIEW` and a run that arrived there stayed there.
+///
+/// # Unfenced, and guarded by state
+///
+/// The same argument [`resume_after_grant`] makes: a run in `AWAITING_REVIEW` has
+/// released its lease and is waiting for a person, so there is no lease-holder to
+/// fence against. `WHERE state = 'AWAITING_REVIEW'` is the whole guard, and it is
+/// doing two jobs — it stops a review decision from touching a run that is busy
+/// running an agent, and it makes two operators answering the same review produce
+/// one winner rather than one overwrite.
+///
+/// The guard is a `WHERE` clause and **not** a prior `SELECT`, because a read
+/// followed by a write is two statements a competitor can interleave.
+///
+/// # The proof travels in the argument
+///
+/// [`ReviewOutcome::Accepted`] carries a
+/// [`VerifiedComplete`](conductor_core::completion::VerifiedComplete), so this
+/// function cannot be asked to write `COMPLETE` by a caller that has not run
+/// §4.5's gate. That is deliberate and is the reason the parameter is a
+/// `ReviewOutcome` rather than a [`RunState`]: with a bare state, `accept` would
+/// be the one door into `COMPLETE` needing no evidence, and it would be the door
+/// a human is actively encouraged to walk through.
+///
+/// There is no `pause` here. Pausing writes no state, and a self-transition is
+/// refused anyway.
+pub fn apply_review_decision(
+    conn: &mut Connection,
+    run_id: &RunId,
+    outcome: ReviewOutcome,
+    detail: &str,
+    now_ms: i64,
+) -> StoreResult<RunState> {
+    let next = outcome.state();
+    // §5.2's table still decides. The `ReviewOutcome` variants were chosen to
+    // match it, and this check is what keeps that a fact rather than a comment.
+    RunState::AwaitingReview
+        .as_task_state()
+        .transition_to(next.as_task_state())
+        .map_err(|e| StoreError::IllegalTaskTransition(e.to_string()))?;
+
+    with_immediate(conn, |tx| {
+        let changed = tx.execute(
+            "UPDATE run SET state = ?2 WHERE id = ?1 AND state = 'AWAITING_REVIEW'",
+            params![run_id.as_str(), next.as_str()],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotInState {
+                run_id: run_id.as_str().to_string(),
+                required: RunState::AwaitingReview,
+            });
+        }
+        append_event(
+            tx,
+            run_id,
+            EventKind::RunStateChanged,
+            &format!(
+                r#"{{"to":"{}","route":"REVIEW","detail":{}}}"#,
+                next.as_str(),
+                serde_json::to_string(detail).unwrap_or_else(|_| "\"\"".to_string())
+            ),
+            now_ms,
+        )?;
+        Ok(next)
+    })
 }
 
 /// Move a run from `required` to `next`, checking §5.2's table.

@@ -368,7 +368,40 @@ fn deleting_the_socket_while_serving_is_detected_rather_than_served_into_the_voi
         .stderr(Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("spawn {CONDUCTOR}: {e}"));
+    // **Sync on the banner, not on connectability.** `wait_for_socket` returns as
+    // soon as `connect` succeeds, and that is true the instant `publish`'s atomic
+    // rename lands — while two `stat`s of the socket are still ahead: `publish`
+    // reads dev+inode immediately after the rename, and `approval serve` then
+    // calls `socket.mode()` for §4.3's tier line. Unlinking in that window makes
+    // whichever comes next fail with a bare `stat … No such file or directory`,
+    // the server exits non-zero having **never served**, and this test fails on
+    // its *message* while the product behaved correctly — it did fail closed.
+    //
+    // Those two call sites are the only places in `socket.rs` that can emit that
+    // string for the socket path, and both are upstream of `serve()`, so the
+    // attribution is from the message alone rather than from a guess.
+    //
+    // That is a different scenario from the one this test is named for. The banner
+    // is printed after `mode()` and immediately before `serve()`, so reading one
+    // line of it is a deterministic "the server is now serving" — which is the
+    // precondition the assertion below actually depends on.
+    //
+    // Observed as a real intermittent failure, not a hypothetical: one full-suite
+    // run reported `stat /var/folders/…/conductor.sock: No such file or directory`
+    // at this assertion.
     wait_for_socket(&world.socket());
+    let mut banner = String::new();
+    {
+        let pipe = server.stdout.take().expect("stdout is piped");
+        let mut reader = BufReader::new(pipe);
+        reader
+            .read_line(&mut banner)
+            .expect("the server must announce itself before it serves");
+    }
+    assert!(
+        banner.contains("serving"),
+        "the sync point must be the serving banner: {banner}"
+    );
 
     std::fs::remove_file(world.socket()).expect("unlink the socket");
 

@@ -66,6 +66,32 @@ fn classify(run: &Run, scope: &[&str]) -> conductor_git::reconcile::Reconciliati
     )
 }
 
+/// A report claiming `COMPLETE` and naming `files_touched`.
+///
+/// A helper rather than four struct literals, because `AgentReport` grows: S13
+/// added §6.5's five review inputs, and every literal in the repository stopped
+/// compiling at once. Reconciliation reads `claim` and `files_touched` and nothing
+/// else — the review inputs are for a human — so a constructor that fixes the rest
+/// at "the agent said nothing" is the shape these tests actually want.
+///
+/// Deliberately **not** a `Default` impl on `AgentReport` itself: `claim` has no
+/// safe default, and the only fail-closed candidate (`FAILED`) would let a
+/// `..Default::default()` somewhere in production build a report that reads as a
+/// real one.
+fn claiming_complete(files_touched: &[&str]) -> AgentReport {
+    AgentReport {
+        claim: ReportClaim::Complete,
+        files_touched: files_touched.iter().map(|f| (*f).to_string()).collect(),
+        summary: String::new(),
+        task_id: None,
+        commands_run: Vec::new(),
+        acceptance_criteria: Vec::new(),
+        deviations: Vec::new(),
+        blockers: Vec::new(),
+        unverified_claims: Vec::new(),
+    }
+}
+
 #[test]
 fn nothing_happened_is_no_change() {
     let run = run();
@@ -90,11 +116,7 @@ fn in_scope_changes_with_a_consistent_report_are_clean_complete() {
     write(run.path(), "src/lib.rs", "pub fn one() -> u32 { 11 }\n");
     let observed = observe(run.path(), &run.ws.baseline).expect("observe");
 
-    let report = AgentReport {
-        claim: ReportClaim::Complete,
-        files_touched: vec!["src/lib.rs".to_string()],
-        summary: String::new(),
-    };
+    let report = claiming_complete(&["src/lib.rs"]);
     let result = reconcile(
         &run.ws.baseline,
         &observed,
@@ -289,11 +311,7 @@ fn a_report_claiming_success_over_an_untouched_tree_is_contradicted() {
     // Acceptance row 6. Git wins.
     let run = run();
     let observed = observe(run.path(), &run.ws.baseline).expect("observe");
-    let report = AgentReport {
-        claim: ReportClaim::Complete,
-        files_touched: Vec::new(),
-        summary: String::new(),
-    };
+    let report = claiming_complete(&[]);
 
     let result = reconcile(
         &run.ws.baseline,
@@ -320,11 +338,7 @@ fn a_report_naming_a_file_git_never_saw_change_is_contradicted() {
     let run = run();
     write(run.path(), "src/lib.rs", "pub fn one() -> u32 { 11 }\n");
     let observed = observe(run.path(), &run.ws.baseline).expect("observe");
-    let report = AgentReport {
-        claim: ReportClaim::Complete,
-        files_touched: vec!["src/lib.rs".to_string(), "src/ghost.rs".to_string()],
-        summary: String::new(),
-    };
+    let report = claiming_complete(&["src/lib.rs", "src/ghost.rs"]);
 
     let result = reconcile(
         &run.ws.baseline,
@@ -356,11 +370,7 @@ fn an_observed_change_the_report_does_not_mention_raises_a_finding_without_chang
     write(run.path(), "src/lib.rs", "pub fn one() -> u32 { 11 }\n");
     write(run.path(), "src/two.rs", "pub fn two() -> u32 { 22 }\n");
     let observed = observe(run.path(), &run.ws.baseline).expect("observe");
-    let report = AgentReport {
-        claim: ReportClaim::Complete,
-        files_touched: vec!["src/lib.rs".to_string()],
-        summary: String::new(),
-    };
+    let report = claiming_complete(&["src/lib.rs"]);
 
     let result = reconcile(
         &run.ws.baseline,

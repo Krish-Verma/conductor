@@ -110,6 +110,91 @@ pub enum StoreError {
     #[error("illegal task transition: {0}")]
     IllegalTaskTransition(String),
 
+    /// A review transition §5.2's three-state machine does not draw.
+    ///
+    /// The counterpart to [`StoreError::IllegalTaskTransition`] for the `review`
+    /// row. Modelled on it deliberately: `review.state` is a third column that
+    /// can carry a state-machine claim, and the claim has to be refused by
+    /// whatever writes the column rather than by each call site remembering to
+    /// ask.
+    #[error("illegal review transition: {0}")]
+    IllegalReviewTransition(String),
+
+    /// A review write required the review to be in a state it is not in.
+    ///
+    /// Reported when the guarded `UPDATE` changed no row, which is the authority
+    /// — a prior `SELECT` says what was true when it ran. Distinct from
+    /// [`StoreError::IllegalReviewTransition`] because the two describe different
+    /// mistakes: an illegal transition is a caller asking for an edge §5.2 does
+    /// not draw, while this is a caller asking for a legal edge from the wrong
+    /// end of it.
+    #[error("review {review_id} is not in {required}, so it cannot be moved")]
+    ReviewNotInState {
+        /// The review.
+        review_id: String,
+        /// The state the transition required it to be in.
+        required: conductor_core::ReviewState,
+    },
+
+    /// A decision was recorded against a review that has no packet hash.
+    ///
+    /// §4.3's `REVIEW_ACCEPTANCE` authorizes **a review packet**, so a decision
+    /// with nothing to bind to would be an approval of something nobody has read.
+    /// The whole review-authority story rests on this refusal, which is why it is
+    /// its own variant rather than a `Domain` string: a caller can match on it,
+    /// and a test can prove it fired for this reason and not another.
+    #[error("review {review_id} has no packet hash, so no decision can be recorded against it")]
+    DecisionWithoutPacket {
+        /// The review.
+        review_id: String,
+    },
+
+    /// A second review was opened for a run that already has an open one.
+    ///
+    /// The guarantee is `ix_review_one_open_per_run`, the unique partial index;
+    /// this variant is what [`crate::review::open`]'s pre-check reports so the
+    /// refusal has a name instead of arriving as a bare constraint violation. The
+    /// index is still there and still authoritative — a future second write path
+    /// that forgets the pre-check is refused by the database, which is the point
+    /// of putting the rule in the schema and not only in this crate.
+    #[error("run {run_id} already has an open review ({open_review_id})")]
+    ReviewAlreadyOpen {
+        /// The run.
+        run_id: String,
+        /// The review that is already open for it.
+        open_review_id: String,
+    },
+
+    /// An update named a review that does not exist.
+    ///
+    /// Separated from "the update changed nothing" for the reason
+    /// [`StoreError::NoSuchTask`] gives: a silent no-op would let an operator
+    /// believe a human decision had been recorded somewhere when it had been
+    /// recorded nowhere.
+    #[error("no review {0}")]
+    NoSuchReview(String),
+
+    /// A second resolution for a finding a human has already resolved.
+    ///
+    /// §4.8: findings never auto-resolve, and a resolution carries *why* a person
+    /// accepted the finding. Overwriting one would delete the first human's
+    /// reason and leave no trace that it had ever been given, so the second write
+    /// is refused rather than applied.
+    #[error("finding {finding_id} is already resolved; a second resolution would erase the first")]
+    FindingAlreadyResolved {
+        /// The finding.
+        finding_id: String,
+    },
+
+    /// A resolution named a finding this run does not have.
+    #[error("no finding {finding_id} on run {run_id}")]
+    NoSuchFinding {
+        /// The finding.
+        finding_id: String,
+        /// The run it was expected on.
+        run_id: String,
+    },
+
     /// A `TEXT` column held a value the domain does not recognise.
     #[error("invalid domain value read from the store: {0}")]
     Domain(String),
@@ -136,6 +221,20 @@ impl From<conductor_core::IdError> for StoreError {
 
 impl From<conductor_core::ParseStateError> for StoreError {
     fn from(value: conductor_core::ParseStateError) -> Self {
+        StoreError::Domain(value.to_string())
+    }
+}
+
+/// A `review.decision` that is not one of §6.5's five reads as a domain error,
+/// never as a default.
+///
+/// §6.5's decision is the most typo-exposed value in the system — a human types
+/// it by hand — and one of the five advances a task to `COMPLETE`. §4.4's rule
+/// for an action nobody recognises is that it *fails closed*, so an unreadable
+/// column becomes an error on the read path rather than the most permissive known
+/// decision on the write path.
+impl From<conductor_core::ParseReviewDecisionError> for StoreError {
+    fn from(value: conductor_core::ParseReviewDecisionError) -> Self {
         StoreError::Domain(value.to_string())
     }
 }

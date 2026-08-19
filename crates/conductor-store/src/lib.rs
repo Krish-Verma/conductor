@@ -11,6 +11,7 @@ pub mod lease;
 pub mod ledger;
 pub mod migrate;
 pub mod repair;
+pub mod review;
 pub mod run;
 pub mod schema;
 pub mod side_effect;
@@ -23,7 +24,7 @@ use std::path::{Path, PathBuf};
 use conductor_core::effect::{OperationId, Precondition, SideEffectKind, SideEffectState};
 use conductor_core::{
     AttemptId, EventKind, Fence, PlanVersionId, PlanVersionState, ProjectId, ReconciledRoute,
-    RunId, RunState, TaskId, TaskState, TerminalAttempt,
+    ReviewDecision, RunId, RunState, TaskId, TaskState, TerminalAttempt,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -37,11 +38,13 @@ pub use ledger::{
 };
 pub use migrate::{MigrationStep, migrate};
 pub use repair::{NewRepairObservation, RepairObservationRow};
+pub use review::{NewReview, ReviewRow};
 pub use run::{FindingRow, RunRow};
 pub use schema::PragmaReport;
 pub use side_effect::SideEffectRow;
 pub use task::{NewRun, NewTask, TaskRow};
 pub use tx::with_immediate;
+pub use verification::RunCheckResult;
 
 /// An open store.
 #[derive(Debug)]
@@ -216,6 +219,21 @@ impl Store {
         run::findings_for_run(&self.conn, run_id)
     }
 
+    /// Resolve a finding on a human's say-so (§4.8, S13). Fenced.
+    ///
+    /// The only writer of `finding.resolution`, and it refuses a second
+    /// resolution rather than overwriting the first human's reason; see
+    /// [`run::resolve_finding`].
+    pub fn resolve_finding(
+        &mut self,
+        fence: &Fence,
+        id: &str,
+        resolution: &str,
+        now_ms: i64,
+    ) -> StoreResult<()> {
+        run::resolve_finding(&mut self.conn, fence, id, resolution, now_ms)
+    }
+
     /// Expire overdue approval requests (§4.7 step 9).
     pub fn expire_approvals(&mut self, now_ms: i64) -> StoreResult<Vec<String>> {
         run::expire_approvals(&mut self.conn, now_ms)
@@ -230,6 +248,15 @@ impl Store {
     /// Whether a verification result is already cached for this tree.
     pub fn has_valid_verification(&self, tree_hash: &str) -> StoreResult<bool> {
         run::has_valid_verification(&self.conn, tree_hash)
+    }
+
+    /// Every verification check recorded for one run, in the order they ran.
+    ///
+    /// The single accessor for a query two call sites hand-roll today; the
+    /// command **text** is not stored, only its hash. See
+    /// [`verification::results_for_run`].
+    pub fn verification_results_for_run(&self, run_id: &RunId) -> StoreResult<Vec<RunCheckResult>> {
+        verification::results_for_run(&self.conn, run_id)
     }
 
     // ---- leases and fencing (§4.7) ---------------------------------------
@@ -328,6 +355,23 @@ impl Store {
         now_ms: i64,
     ) -> StoreResult<RunState> {
         lease::escalate_from_repairing(&mut self.conn, fence, detail, now_ms)
+    }
+
+    /// Move a run out of `AWAITING_REVIEW` on a human's decision — §5.2's four
+    /// edges out of the review state, which had no writer at all before S13.
+    ///
+    /// Unfenced by design, and the evidence travels in the argument:
+    /// `ReviewOutcome::Accepted` carries a `VerifiedComplete`, so `accept` cannot
+    /// become a door into `COMPLETE` that skips §4.5's gate. See
+    /// [`lease::apply_review_decision`].
+    pub fn apply_review_decision(
+        &mut self,
+        run_id: &RunId,
+        outcome: conductor_core::ReviewOutcome,
+        detail: &str,
+        now_ms: i64,
+    ) -> StoreResult<RunState> {
+        lease::apply_review_decision(&mut self.conn, run_id, outcome, detail, now_ms)
     }
 
     // ---- repair observations (§4.6, schema v5) ---------------------------
@@ -696,5 +740,54 @@ impl Store {
         to: DecisionStatus,
     ) -> StoreResult<DecisionStatus> {
         ledger::set_decision_status(&mut self.conn, id, to)
+    }
+
+    // -- reviews: §5.2's three states, §6.5's packet and decision (S13) -----
+
+    /// Open a review in `PENDING`. At most one open review per run.
+    pub fn open_review(&mut self, new: &NewReview, now_ms: i64) -> StoreResult<ReviewRow> {
+        review::open(&mut self.conn, new, now_ms)
+    }
+
+    /// `PENDING → EXPORTED`, binding the review to the packet a human will read.
+    pub fn mark_review_exported(
+        &mut self,
+        id: &str,
+        packet_hash: &str,
+        packet_path: &str,
+    ) -> StoreResult<ReviewRow> {
+        review::mark_exported(&mut self.conn, id, packet_hash, packet_path)
+    }
+
+    /// `EXPORTED → DECIDED`, recording §6.5's imported decision.
+    ///
+    /// Refused while `packet_hash` is `NULL`: the decision authorizes a packet
+    /// (§4.3), not a review in the abstract. Does **not** move the task — that
+    /// goes through [`Store::set_task_state`], which checks §5.2's table.
+    pub fn record_review_decision(
+        &mut self,
+        id: &str,
+        decision: ReviewDecision,
+        decided_by: &str,
+        notes: Option<&str>,
+        now_ms: i64,
+    ) -> StoreResult<ReviewRow> {
+        review::record_decision(&mut self.conn, id, decision, decided_by, notes, now_ms)
+    }
+
+    /// One review by id.
+    pub fn review(&self, id: &str) -> StoreResult<Option<ReviewRow>> {
+        review::review(&self.conn, id)
+    }
+
+    /// The one open review of a run, if it has one — what the export and import
+    /// paths resolve, since an operator names a run rather than a review.
+    pub fn open_review_for_run(&self, run_id: &RunId) -> StoreResult<Option<ReviewRow>> {
+        review::open_review_for_run(&self.conn, run_id)
+    }
+
+    /// Every review of a run, oldest first.
+    pub fn reviews_for_run(&self, run_id: &RunId) -> StoreResult<Vec<ReviewRow>> {
+        review::reviews_for_run(&self.conn, run_id)
     }
 }

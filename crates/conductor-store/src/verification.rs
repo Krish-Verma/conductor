@@ -219,6 +219,86 @@ pub fn record(
     })
 }
 
+/// One recorded check of a run, as a packet or a status report reads it.
+///
+/// Distinct from [`CachedResult`] on purpose. `CachedResult` answers the cache's
+/// question — "is there an answer for *this key*?" — so it carries no key columns.
+/// This answers a run's question, "what has been checked for me?", which is
+/// useless without `check_id` (*which* check) and `tree_hash` (which tree it was
+/// bound to, §4.5's whole point). Widening `CachedResult` to serve both would put
+/// key columns on a type whose reason for existing is that the caller already
+/// knows the key.
+///
+/// **The command text is not here, and cannot be.** `verification_check` stores
+/// `command_hash` and no argv: §4.5 keys the cache by a digest of the resolved
+/// command, and the command itself lives in the verification profile. Nobody
+/// should expect to recover "what was actually run" from this row — only "which
+/// check id, over which tree, with what outcome".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RunCheckResult {
+    /// `check.id` from the profile.
+    pub check_id: String,
+    /// The §4.5 outcome.
+    pub outcome: VerificationOutcome,
+    /// The **working**-tree hash the check was bound to.
+    pub tree_hash: String,
+    /// The check's exit code, when it produced one.
+    pub exit_code: Option<i32>,
+    /// Wall time.
+    pub duration_ms: Option<i64>,
+    /// The attempt this ran under, when there is one.
+    pub attempt_id: Option<String>,
+    /// Where the log went. **Never the log itself** (§4.5).
+    pub log_path: Option<String>,
+}
+
+/// Every check recorded for one run, in the order they were recorded.
+///
+/// # Why this exists as an accessor
+///
+/// Two call sites hand-roll this `SELECT` today —
+/// `conductor-cli/src/task.rs`'s `stored_checks` and
+/// `conductor-run/src/packet/continuation.rs`'s `stored_passing_checks` — and
+/// both do it with `unwrap_or_default()`, so a query that fails silently reports
+/// *no checks* rather than an error. That is the shape of defect §4.5 cares about
+/// most: "no checks recorded" and "we could not read the checks" are opposite
+/// facts, and one of them is a reason to refuse completion. This returns a
+/// [`StoreResult`], so the difference survives.
+///
+/// **Those two callers should migrate to it.** S13 does not own their files, so
+/// they are left as they are rather than edited from here; the duplication is
+/// recorded so it is a known debt instead of a discovery.
+///
+/// `ORDER BY rowid` — insertion order, which is what a packet quoting "the checks
+/// that ran" wants, and what the CLI's hand-rolled query already used. Not
+/// `duration_ms` or `check_id`: the sequence a human is reading is chronological.
+pub fn results_for_run(
+    conn: &Connection,
+    run_id: &conductor_core::RunId,
+) -> StoreResult<Vec<RunCheckResult>> {
+    let mut stmt = conn.prepare(
+        "SELECT check_id, outcome, tree_hash, exit_code, duration_ms, attempt_id, log_path
+           FROM verification_check WHERE run_id = ?1 ORDER BY rowid",
+    )?;
+    let mut rows = stmt.query(params![run_id.as_str()])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        let outcome: String = row.get(1)?;
+        out.push(RunCheckResult {
+            check_id: row.get(0)?,
+            // Parsed, never defaulted: an outcome string this binary does not
+            // recognise is an error, not `PASS`.
+            outcome: outcome.parse::<VerificationOutcome>()?,
+            tree_hash: row.get(2)?,
+            exit_code: row.get(3)?,
+            duration_ms: row.get(4)?,
+            attempt_id: row.get(5)?,
+            log_path: row.get(6)?,
+        });
+    }
+    Ok(out)
+}
+
 /// Every result recorded for one tree, newest row first.
 pub fn results_for_tree(conn: &Connection, tree_hash: &str) -> StoreResult<Vec<CachedResult>> {
     let mut stmt = conn.prepare(

@@ -8,7 +8,7 @@ use conductor_core::{EventKind, Fence, RunId, RunState};
 use rusqlite::{Connection, params};
 use serde::Serialize;
 
-use crate::error::StoreResult;
+use crate::error::{StoreError, StoreResult};
 use crate::lease::{append_event, check_fence};
 use crate::tx::with_immediate;
 
@@ -157,9 +157,10 @@ pub fn attach_workspace(
 
 /// Raise a finding. Fenced.
 ///
-/// §4.8: **findings never auto-resolve.** There is deliberately no function in
-/// this module that clears one; `resolution` is written by a human decision path
-/// (S13), never by the runtime.
+/// §4.8: **findings never auto-resolve.** The only function in this module that
+/// writes `resolution` is [`resolve_finding`], which exists to serve S13's human
+/// decision path; no runtime path clears a finding, and none may be added without
+/// making that sentence false.
 pub fn record_finding(
     conn: &mut Connection,
     fence: &Fence,
@@ -208,8 +209,93 @@ pub struct FindingRow {
     pub severity: String,
     /// `finding.evidence_ref`.
     pub evidence_ref: String,
-    /// `finding.resolution` — never written by the runtime.
+    /// `finding.resolution` — never written by the runtime; `Some` only when a
+    /// human resolved it through [`resolve_finding`].
     pub resolution: Option<String>,
+}
+
+/// Resolve a finding, on a human's say-so — §4.8's other half, and the only
+/// writer of `finding.resolution`.
+///
+/// # Why this is not the runtime clearing its own findings
+///
+/// §4.8 says findings never auto-resolve, and until S13 this module deliberately
+/// had no way to write the column at all. That was the right shape while there was
+/// no human decision path: a `resolve_finding` reachable from the runtime is a
+/// runtime that can clear the evidence against itself. What makes this function
+/// the human path rather than a hole in that rule is not a flag or a naming
+/// convention — it is that `resolution` holds *the reason a person gave*, and
+/// nothing in the runtime has one to give.
+///
+/// **Fenced**, unlike the review writes in [`crate::review`], and the difference
+/// is real rather than inconsistent: a finding is attached to a run's execution
+/// history, and a resolution recorded by a worker whose lease has been revoked
+/// would be a write over a successor's view of the same run. A review is answered
+/// out of band by a person and has no lease to fence against; a finding
+/// resolution rides in on a run that is being worked.
+///
+/// # A second resolution is refused, not applied
+///
+/// `WHERE … AND resolution IS NULL` is the guard, and `changed == 0` is the
+/// refusal — never a silent success. Overwriting an existing resolution would
+/// delete the first human's reason and leave no trace that it had been given,
+/// which is the one thing this column exists to preserve. The two ways the update
+/// can match nothing are told apart afterwards, inside the same transaction, so
+/// "already resolved" is not reported as "no such finding": they call for opposite
+/// responses from the operator.
+pub fn resolve_finding(
+    conn: &mut Connection,
+    fence: &Fence,
+    id: &str,
+    resolution: &str,
+    now_ms: i64,
+) -> StoreResult<()> {
+    with_immediate(conn, |tx| {
+        check_fence(tx, fence)?;
+        let changed = tx.execute(
+            "UPDATE finding SET resolution = ?3
+              WHERE id = ?1 AND run_id = ?2 AND resolution IS NULL",
+            params![id, fence.run_id().as_str(), resolution],
+        )?;
+        if changed == 0 {
+            // Distinguish the two failures from the row itself rather than from
+            // a `SELECT` taken before the update: this one is inside the same
+            // transaction, so what it reads is what the update wrote over.
+            let existing: Option<Option<String>> = tx
+                .query_row(
+                    "SELECT resolution FROM finding WHERE id = ?1 AND run_id = ?2",
+                    params![id, fence.run_id().as_str()],
+                    |row| row.get(0),
+                )
+                .ok();
+            return match existing {
+                Some(Some(_)) => Err(StoreError::FindingAlreadyResolved {
+                    finding_id: id.to_string(),
+                }),
+                _ => Err(StoreError::NoSuchFinding {
+                    finding_id: id.to_string(),
+                    run_id: fence.run_id().as_str().to_string(),
+                }),
+            };
+        }
+        // Its own kind, because §4.8's rule is that findings never auto-resolve:
+        // "raised" and "a person answered this" have to be different events, or an
+        // auditor counting `FINDING_RAISED` rows cannot tell one finding answered
+        // from two findings raised.
+        append_event(
+            tx,
+            fence.run_id(),
+            EventKind::FindingResolved,
+            &serde_json::json!({
+                "finding": id,
+                "resolved": true,
+                "resolution": resolution,
+            })
+            .to_string(),
+            now_ms,
+        )?;
+        Ok(())
+    })
 }
 
 /// Every finding for a run, oldest first.

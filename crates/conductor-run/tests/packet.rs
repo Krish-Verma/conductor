@@ -806,3 +806,308 @@ fn a_clean_packet_is_not_marked_redacted() {
     );
     assert!(rendered.contains("AC-1"), "{rendered}");
 }
+
+// ---------------------------------------------------------------------------
+// §6.5's review packet (S13) — the one packet whose reader is a person
+// ---------------------------------------------------------------------------
+
+use conductor_run::packet::review;
+
+/// A review half with one of everything §6.5 names, so a conformance test can
+/// assert the fields rather than the plumbing.
+fn review_fields() -> review::ReviewFields {
+    review::ReviewFields {
+        tasks: vec!["T-0001".to_string()],
+        boundary: "policy_violation".to_string(),
+        end_state: "AWAITING_REVIEW".to_string(),
+        proposed_next_state: "COMPLETE".to_string(),
+        claims: review::Claims {
+            claim: Some("COMPLETE".to_string()),
+            task_id: Some("T-0001".to_string()),
+            files_touched: vec!["src/added.rs".to_string()],
+            summary: "added a function".to_string(),
+            commands_run: vec!["cargo test".to_string()],
+            acceptance_criteria: vec!["AC-1".to_string()],
+            deviations: vec!["used a different helper name".to_string()],
+            blockers: vec!["none".to_string()],
+            unverified_claims: vec!["it is faster".to_string()],
+        },
+        measured: review::Measured {
+            reconciliation_verdict: "CONTRADICTED".to_string(),
+            tree_hash: "tree-abc".to_string(),
+            changed_paths: vec!["src/other.rs".to_string()],
+            commits: vec!["abcdef123456".to_string()],
+        },
+        diff: continuation::Diff::summary(1, 4, 0),
+        checks: vec![review::CheckLine {
+            check_id: "unit-tests".to_string(),
+            command: "/bin/sh -c echo ok".to_string(),
+            outcome: "PASS".to_string(),
+            exit_code: Some(0),
+            duration_ms: Some(12),
+            tree_hash: "tree-abc".to_string(),
+        }],
+        policy: vec![review::PolicyLine {
+            action: "dependency.add".to_string(),
+            decision: "require_approval".to_string(),
+            explanation: "rule dep-1 matched the manifest change".to_string(),
+        }],
+        approvals: vec![review::ApprovalLine {
+            grant_id: "AG-1".to_string(),
+            kind: "DEPENDENCY_ADD".to_string(),
+            scope: "package=serde".to_string(),
+            granted_by: "operator".to_string(),
+        }],
+        unresolved_findings: vec![review::FindingLine {
+            id: "F-1".to_string(),
+            kind: "REPORTCONTRADICTED".to_string(),
+            severity: "CRITICAL".to_string(),
+            evidence_ref: "src/other.rs".to_string(),
+        }],
+    }
+}
+
+#[test]
+fn a_review_packet_carries_every_field_section_6_5_names() {
+    // §6.5's list, read as a checklist. Asserted against the rendered YAML rather
+    // than the struct, because the struct is what this test was written from and
+    // the YAML is what a human actually gets — a field lost in serialization
+    // (`skip_serializing_if` on the wrong thing, a rename) reaches the reviewer as
+    // absent, and absent reads as "there were none".
+    let dir = repo();
+    let db = dir.path().join("conductor.db");
+    let (_project, run) = live(dir.path(), &db, 1_000);
+    let mut store = Store::open_existing(&db).expect("store");
+
+    let packet = review::build(&mut store, &run, &review_fields()).expect("compose");
+    let yaml = packet.to_yaml();
+
+    // The discriminant, so a reader (and the import path) can tell which of the
+    // four packet shapes this is.
+    assert!(yaml.contains("packet: review"), "{yaml}");
+
+    for needle in [
+        // plan version and hash — inherited from the implementation half
+        "plan_version",
+        "plan_hash",
+        // task ids, base commit, end state, proposed next state
+        "T-0001",
+        "base_commit",
+        "end_state",
+        "proposed_next_state",
+        // the diff, stat inline
+        "insertions",
+        // agent claims vs reconciliation verdict, side by side
+        "claims",
+        "measured",
+        "CONTRADICTED",
+        "deviations",
+        "used a different helper name",
+        "unverified_claims",
+        // every verification command with exit code and duration
+        "unit-tests",
+        "exit_code",
+        "duration_ms",
+        // policy evaluations and explanations
+        "require_approval",
+        "rule dep-1 matched the manifest change",
+        // approvals granted with scope
+        "AG-1",
+        "package=serde",
+        // unresolved findings
+        "unresolved_findings",
+        "F-1",
+    ] {
+        assert!(
+            yaml.contains(needle),
+            "§6.5 names {needle:?} and the review packet does not carry it:\n{yaml}"
+        );
+    }
+}
+
+#[test]
+fn a_review_packet_shows_the_agents_claim_and_the_measured_verdict_without_reconciling_them() {
+    // Acceptance row 6 is "the agent said COMPLETE and the tree says otherwise".
+    // The packet's job is to put both in front of a human **unreconciled** — a
+    // packet that resolved the disagreement itself would be making the decision it
+    // exists to inform, and §4.8's doctrine is that the measured fact survives.
+    let dir = repo();
+    let db = dir.path().join("conductor.db");
+    let (_project, run) = live(dir.path(), &db, 1_000);
+    let mut store = Store::open_existing(&db).expect("store");
+
+    let packet = review::build(&mut store, &run, &review_fields()).expect("compose");
+    let yaml = packet.to_yaml();
+
+    assert!(
+        yaml.contains("claim: COMPLETE"),
+        "the agent's claim must survive verbatim:\n{yaml}"
+    );
+    assert!(
+        yaml.contains("reconciliation_verdict: CONTRADICTED"),
+        "and so must the verdict that contradicts it:\n{yaml}"
+    );
+    // The two sides disagree about which file changed, and both lists travel.
+    assert!(yaml.contains("src/added.rs"), "the claimed path:\n{yaml}");
+    assert!(yaml.contains("src/other.rs"), "the measured path:\n{yaml}");
+}
+
+#[test]
+fn the_same_durable_state_produces_a_byte_identical_review_packet_from_a_separate_store() {
+    // §6.6, for the fourth packet. Two stores, two directories, two wall clocks.
+    let first = repo();
+    let second = repo();
+    let db_one = first.path().join("conductor.db");
+    let db_two = second.path().join("conductor.db");
+    let (_p1, run_one) = live(first.path(), &db_one, 1_000);
+    let (_p2, run_two) = live(second.path(), &db_two, 9_999_000);
+
+    let mut store_one = Store::open_existing(&db_one).expect("store one");
+    let mut store_two = Store::open_existing(&db_two).expect("store two");
+
+    let one = review::build(&mut store_one, &run_one, &review_fields()).expect("one");
+    let two = review::build(&mut store_two, &run_two, &review_fields()).expect("two");
+
+    assert_eq!(
+        one.canonical_bytes(),
+        two.canonical_bytes(),
+        "a review packet's canonical bytes must not depend on which store built it"
+    );
+    assert_eq!(one.hash().as_str(), two.hash().as_str());
+}
+
+#[test]
+fn a_review_packet_links_a_large_diff_rather_than_carrying_it() {
+    // The bound, on the packet whose reader most wants to see everything. A diff
+    // travels as a path and a digest; the stat is what goes inline.
+    let dir = repo();
+    let db = dir.path().join("conductor.db");
+    let (_project, run) = live(dir.path(), &db, 1_000);
+    let mut store = Store::open_existing(&db).expect("store");
+
+    let big = dir.path().join("run.diff");
+    std::fs::write(&big, "+".repeat(600 * 1024)).expect("write a 600 KB diff");
+
+    let mut fields = review_fields();
+    fields.diff = continuation::Diff::linked(&big).expect("link");
+
+    let packet = review::build(&mut store, &run, &fields).expect("compose");
+    let emitted = packet
+        .emit()
+        .expect("a linked diff must stay within the ceiling");
+
+    assert!(
+        emitted.bytes().len() < 64 * 1024,
+        "the packet carried the diff instead of linking it: {} bytes",
+        emitted.bytes().len()
+    );
+    let yaml = packet.to_yaml();
+    assert!(yaml.contains("run.diff"), "the path must travel:\n{yaml}");
+    assert!(yaml.contains("blake3:"), "and so must the digest:\n{yaml}");
+    assert!(
+        !yaml.contains(&"+".repeat(1024)),
+        "the diff's bytes must not be in the packet"
+    );
+}
+
+#[test]
+fn an_oversized_review_packet_is_refused_rather_than_silently_truncated() {
+    // The refusal direction. A review packet quietly missing its last finding is
+    // the worst possible thing to hand a human who is about to accept work, so the
+    // ceiling is an error and not a truncation.
+    let dir = repo();
+    let db = dir.path().join("conductor.db");
+    let (_project, run) = live(dir.path(), &db, 1_000);
+    let mut store = Store::open_existing(&db).expect("store");
+
+    let mut fields = review_fields();
+    fields.unresolved_findings = (0..4_000)
+        .map(|i| review::FindingLine {
+            id: format!("F-{i}"),
+            kind: "OUTOFSCOPEPATH".to_string(),
+            severity: "BLOCKING".to_string(),
+            evidence_ref: format!("src/generated/file_{i}.rs"),
+        })
+        .collect();
+
+    let packet = review::build(&mut store, &run, &fields).expect("compose");
+    match packet.emit() {
+        Err(packet::PacketError::OverBudget { bytes, ceiling }) => {
+            assert!(bytes > ceiling, "the refusal must name real numbers");
+        }
+        Err(other) => panic!("the wrong refusal: {other}"),
+        Ok(emitted) => panic!(
+            "an oversized review packet was emitted at {} bytes instead of refused",
+            emitted.bytes().len()
+        ),
+    }
+
+    // Positive control: the same packet without the flood emits, so the refusal
+    // above is the budget and not the composition.
+    let ok = review::build(&mut store, &run, &review_fields()).expect("compose");
+    ok.emit().expect("an ordinary review packet emits");
+}
+
+#[test]
+fn a_credential_an_agent_wrote_into_a_deviation_does_not_reach_the_review_file() {
+    // The review packet added five agent-authored free-text fields
+    // (`deviations`, `blockers`, `unverified_claims`, `commands_run`, `summary`),
+    // and every one is a new surface for the leak S9 measured. `commands_run` is
+    // the sharpest: an agent recording what it ran will paste the command line,
+    // and command lines are where tokens live.
+    let dir = repo();
+    let db = dir.path().join("conductor.db");
+    let (_project, run) = live(dir.path(), &db, 1_000);
+    let mut store = Store::open_existing(&db).expect("store");
+
+    // Fake values only, and shaped like the real thing so the detector is being
+    // tested rather than a placeholder. S12's near-miss was a canary too short to
+    // trip `is_placeholder`, so these are all comfortably long.
+    let aws = format!("AKIA{}", "Q7ZJ4T2LX9WBMN3D");
+    let github = format!("ghp_{}", "9zK4mQ2wX7LpR1sT6vB8nY3fH5jD0aGc4eU2");
+    let mut fields = review_fields();
+    fields.claims.commands_run = vec![format!("curl -H 'Authorization: token {github}' api")];
+    fields.claims.deviations = vec![format!("had to set AWS_SECRET_ACCESS_KEY={aws}")];
+
+    let packet = review::build(&mut store, &run, &fields).expect("compose");
+    let yaml = packet.to_yaml();
+
+    assert!(
+        !yaml.contains(&aws),
+        "an AWS-shaped key reached the review file"
+    );
+    assert!(
+        !yaml.contains(&github),
+        "a GitHub-shaped token reached the review file"
+    );
+    assert!(
+        yaml.contains("redacted"),
+        "and the packet must say that it redacted something:\n{yaml}"
+    );
+
+    // The redaction reaches the hashed bytes too, not only the rendered YAML —
+    // `canonical_bytes` renders before it encodes, and a packet whose hash was
+    // taken over the unredacted text would leak through the digest's preimage.
+    let bytes = String::from_utf8_lossy(&packet.canonical_bytes()).to_string();
+    assert!(!bytes.contains(&aws), "the canonical bytes carried the key");
+    assert!(
+        !bytes.contains(&github),
+        "the canonical bytes carried the token"
+    );
+}
+
+#[test]
+fn a_review_packet_with_nothing_to_hide_is_not_marked_redacted() {
+    // Positive control for the test above: if `redacted` were always present the
+    // assertion there would be satisfied by a constant.
+    let dir = repo();
+    let db = dir.path().join("conductor.db");
+    let (_project, run) = live(dir.path(), &db, 1_000);
+    let mut store = Store::open_existing(&db).expect("store");
+
+    let packet = review::build(&mut store, &run, &review_fields()).expect("compose");
+    assert!(
+        !packet.to_yaml().contains("redacted"),
+        "a clean review packet must not claim a redaction happened"
+    );
+}

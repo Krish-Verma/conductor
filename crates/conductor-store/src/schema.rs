@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::error::{StoreError, StoreResult};
 
 /// The highest schema version this binary understands.
-pub const SUPPORTED_SCHEMA_VERSION: i64 = 8;
+pub const SUPPORTED_SCHEMA_VERSION: i64 = 9;
 
 /// Pragmas as they are *set*, in application order.
 ///
@@ -587,4 +587,106 @@ pub const SCHEMA_V8: &str = r#"
 ALTER TABLE task ADD COLUMN declared_actions TEXT;
 ALTER TABLE task ADD COLUMN depends_on TEXT;
 ALTER TABLE task ADD COLUMN acceptance_criteria TEXT;
+"#;
+
+/// Schema v9 — the `review` row: §5.2's *"Review (3 states)"* made durable.
+///
+/// # What was missing
+///
+/// §5.2 draws a three-state review machine (`PENDING → EXPORTED → DECIDED`) and
+/// §6.5 defines the artifact it moves — a review packet, exported for a human,
+/// answered by an imported decision that is "a **mutating** operation … never a
+/// file an agent could write". Neither had a row. Every fact about a review
+/// therefore lived in whatever process happened to be running: which boundary
+/// fired, which packet was written, what its hash was, what a human decided, and
+/// who they were. All of that is exactly what §4.7 assumes survives a kill, and
+/// none of it did.
+///
+/// `run.state = 'AWAITING_REVIEW'` is not a substitute. It records that a run is
+/// waiting; it cannot record *what* it is waiting on, cannot distinguish "nobody
+/// has looked" from "a human looked and paused" (§6.5's `pause`), and offers
+/// nothing for a decision to bind to.
+///
+/// # `packet_hash` is the binding, and its nullability is narrow
+///
+/// The decision authorizes **a specific packet**, not a review in the abstract:
+/// §4.3's `REVIEW_ACCEPTANCE` "authorizes a review packet", and a decision that
+/// floats free of the bytes a human read is an approval of something nobody has
+/// seen. So `packet_hash` is where the authority attaches.
+///
+/// It is nullable for exactly one reason: a `PENDING` review has not been
+/// exported yet, so no packet exists and there is nothing honest to put there.
+/// A sentinel (`''`, `'blake3:0…'`) was rejected on ADR-0007's grounds — a
+/// column holding a value that is not the thing it names is a lie the schema
+/// repeats to every later reader, and this one would be a lie about what a human
+/// authorized. **A decision may never be recorded while `packet_hash` is
+/// `NULL`**; `review::record_decision` refuses it in the `UPDATE`'s own `WHERE`
+/// clause, not merely on a prior `SELECT`, and a test constructs the impossible
+/// row directly to prove the refusal holds even when the state is reached by a
+/// path the API does not offer. `decision`, `decided_by` and `decided_at` are
+/// nullable for the same single reason and become non-null together.
+///
+/// # `ix_review_one_open_per_run` is load-bearing, not hygiene
+///
+/// ```sql
+/// CREATE UNIQUE INDEX ix_review_one_open_per_run ON review(run_id)
+///   WHERE state <> 'DECIDED';
+/// ```
+///
+/// At most **one open review per run**. Without it, two concurrent exports
+/// (an operator and the runtime, or two operators) would mint two packets with
+/// two hashes for one run, and an imported decision would then be bound to
+/// whichever of the two suited whoever wrote it — the "second answer" hazard
+/// [`conductor_core::ReviewState`] makes `DECIDED` terminal to close, reappearing
+/// one level out as a choice of *packet* rather than a choice of *decision*.
+///
+/// The predicate is `<> 'DECIDED'` rather than `IN ('PENDING','EXPORTED')` so
+/// that a state string this binary does not recognise still counts as open and
+/// still blocks a second review: an unknown value must not read as the permissive
+/// case. It mirrors `ix_run_one_active_per_task`, which is partial for the same
+/// reason — a run accumulates decided reviews without bound while the open set is
+/// permanently at most one.
+///
+/// `review::open` also pre-checks for an open review inside the same
+/// `BEGIN IMMEDIATE`, purely so the refusal has a name a caller can match on.
+/// The index is what *guarantees* it; the pre-check is a message.
+///
+/// # `boundary`, and why the three foreign keys are all `NOT NULL`
+///
+/// `boundary` names which review boundary fired (Part 8, S13) — the reason this
+/// review exists, in the words of the thing that opened it. Free text, because
+/// the set of boundaries is not closed and inventing an enum now would either
+/// omit one or invite a migration per boundary.
+///
+/// `run_id`, `task_id` and `plan_version_id` are each `NOT NULL`. A review is
+/// always *of* something, and denormalizing the task and the plan version onto
+/// the row is deliberate rather than redundant: §6.5's packet quotes the plan
+/// version the work was authorized under, and §5.2's plan states let a plan
+/// version be superseded while a review of it is still open. Reaching the plan
+/// version by joining through the run's task would answer "which plan version
+/// does this task belong to *now*", which is a different question from "which
+/// plan version was this review opened against" — and the second is the one a
+/// human's decision was made about.
+pub const SCHEMA_V9: &str = r#"
+CREATE TABLE review (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES run(id),
+  task_id TEXT NOT NULL REFERENCES task(id),
+  plan_version_id TEXT NOT NULL REFERENCES plan_version(id),
+  boundary TEXT NOT NULL,           -- which review boundary fired (§Part 8 S13)
+  state TEXT NOT NULL,              -- PENDING | EXPORTED | DECIDED
+  packet_hash TEXT,                 -- NULL until exported; the decision binds to it
+  packet_path TEXT,                 -- NULL until exported
+  decision TEXT,                    -- NULL until decided; one of §6.5's five
+  decided_by TEXT,
+  decided_at INTEGER,
+  notes TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX ix_review_run ON review(run_id);
+-- At most one *open* review per run, so two concurrent exports cannot mint two
+-- packet hashes that a single decision could then choose between. Partial for
+-- the same reason `ix_run_one_active_per_task` is: the open set is at most one
+-- while the decided set grows without bound.
+CREATE UNIQUE INDEX ix_review_one_open_per_run ON review(run_id) WHERE state <> 'DECIDED';
 "#;

@@ -78,6 +78,7 @@
 pub mod continuation;
 pub mod implementation;
 pub mod repair;
+pub mod review;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
