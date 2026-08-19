@@ -156,6 +156,40 @@ A fourth, smaller: the fixtures left `.conductor/` untracked, making the operato
 repository permanently dirty. It is committed now, which is what §3.2 makes it
 anyway.
 
+**A fifth, found during this report's own verification: an identified flake, with a
+measured root cause.** The re-gate of §7.1 came back `1160 passed / 1 failed`, and the
+harness named the failure instead of losing it:
+`a_successful_agent_is_spawned_streamed_and_reaped`, at
+`assert!(matches!(agent.liveness(), Liveness::Alive(_)))`.
+
+* **Not reproducible in isolation** — 0/40 runs of the test alone, and 0/40 under
+  20 CPU burners on a 10-core host. CPU saturation is not the trigger.
+* **Reproducible at 3/30** running the whole `supervise` binary, whose other fourteen
+  tests provide the real load. The instrumented assertion named the variant every
+  time: `Liveness::Dead`.
+* **Root cause is a measured host fact this project already owns.** The catalogued
+  `success` scenario exits in single-digit milliseconds, so the child can finish
+  before the parent reaches the next line. A child that exited and has not been
+  reaped is a **zombie**, and S11 measured that `proc_pidinfo` fails with `ESRCH`
+  for a zombie on this host — 300/300 against a 0/300 control. `start_time_us`
+  therefore answers `None` and `probe` answers `Dead`, **correctly**: the process
+  really is gone.
+
+So this is the harness asserting a transient state the product never promised — the
+same shape as the flake already recorded above `completing()`, and the second distinct
+flake in this one test. **The product was right both times.** The fix gives the child a
+lifetime long enough to be observed (the `success` steps plus a 250 ms sleep placed
+*after* the first emit, so the supervisor's startup timer still sees output at once)
+and makes the assertion name the variant it saw, because `Dead`, `Recycled` and
+`Unidentified` are three different defects that `matches!` could not distinguish.
+
+Verified: **0/40** whole-binary runs after the fix, against 3/30 before. Stated as
+what it is — a 10 % flake that a clean 40-run sweep leaves at roughly 98 % confidence
+of having dropped, plus a mechanism that is now structurally absent rather than
+re-rolled. Whether this is the same event as the project's historical unidentified
+`765 passed / 1 failed` cannot be established: that run did not record which test
+failed, which is why the harness records it now.
+
 **One near-miss worth recording.** The first secret canary used a 7-character
 password and read as a scanner gap. It was the fixture: `is_placeholder` suppresses
 values under 8 characters deliberately. The canary was fixed, not the scanner —
@@ -195,6 +229,53 @@ Every mutation was **verified present in the source** before its result was read
 | Drop the `.conductor/**` union (attempt 1) | VERIFIED | **nothing — SURVIVED** | **The test was vacuous** — fixed, see the progress report |
 | Same, after adding a fixture that declares nothing | VERIFIED | governance test | The union is load-bearing |
 | **Disable the continuation route** (`} else if false && unfinished {`) | VERIFIED | the Verify line **and** the row-3 delivery test; the other 13 in the file stayed green | The routing is load-bearing for exactly the claims that name it |
+| **Remove §4.3's plan-state gate** (`_state => None`) | VERIFIED | **nothing — SURVIVED**, then killed after a test was added | **The gate had no test.** See §7.1 |
+| Dependency gate always reports satisfied | VERIFIED | `a_task_whose_dependency_is_not_complete_does_not_launch_an_agent`, `running_one_task_never_claims_another_tasks_run` | The dependency edge is load-bearing |
+| §4.3's binding rule derives no requirement from any declaration | VERIFIED | 5 tests in `enforce_eligibility` | The binding rule is load-bearing |
+
+### 7.1 A survivor, found while verifying this report rather than writing it
+
+The three rows above were run **after** this report first claimed completion, as an
+independent check of the integration ADR-0017 describes. The first of them survived:
+with §4.3's plan-state gate replaced by `_state => None`, **all fifteen tests in
+`task_run_plan.rs` still passed** — and the fixture task ran to completion and
+*passed verification* under a plan version no human had approved. That is the exact
+defect ADR-0017 exists to have fixed, reachable again by deleting one match arm, with
+nothing to stop it.
+
+Two tests looked like they covered the gate and neither did:
+
+* `a_task_with_no_approved_plan_does_not_run` asserts §7.2's `2`, which is the
+  *unregistered project* refusal. The gate is never reached.
+* `a_plan_that_is_only_validated_does_not_run_its_tasks` asserted
+  `said(&out).contains("VALIDATED")`. At `VALIDATED` nothing is materialized, so the
+  real refusal is `NoSuchTask` — whose message appends the version listing
+  `v1 VALIDATED` for the operator. **The assertion was passing on a substring emitted
+  by a different error.** This is ADR-0006's vacuity in a new place, and the same tell
+  as S6's: the test's *name* claimed one mechanism while its *assertion* held another.
+
+Both are fixed:
+
+* `a_materialized_task_under_a_non_authoritative_plan_version_is_refused_by_state` is
+  new, and holds the gate — verified to fail under `_state => None` while the other
+  fifteen stay green.
+* the `VALIDATED` assertion now asserts the two halves separately (no task row was
+  materialized; the refusal names the un-materialized task) so it can no longer pass
+  on an unrelated diagnostic.
+
+**Reachability, stated rather than implied.** Every path that creates a `task` row
+requires `APPROVED` first — `plan approve` materializes, and `conductor recover`
+rebuilds a task list only for an approved version. So the gate's refusal arm is not
+reachable from a current product path, which is *why* nothing held it. It is a
+fail-closed invariant guard on the invariant §4.3 rests on — a task row executes only
+while its plan version is authoritative — and §3.1 makes the store the disposable half
+that can come to disagree with `.conductor/`. The new test says so in its own comment
+rather than implying a product path it does not have.
+
+The lesson is the standing check CLAUDE.md already records, applied one level deeper:
+naming a mechanism's product call site is necessary and not sufficient. **The call site
+existed and was correct; what was missing was any test that failed when it was
+removed.**
 
 ---
 
@@ -308,6 +389,16 @@ suites   96      ok, 0 failed
 passed   1160
 failed   0
 ignored  3       (real-Codex, ignored by default)
+panics   0
+```
+
+**Re-gated after §7.1's finding**, with the added test and the repaired assertion:
+
+```
+suites   96      ok, 0 failed
+passed   1161
+failed   0
+ignored  3
 panics   0
 ```
 

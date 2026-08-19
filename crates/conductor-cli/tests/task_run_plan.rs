@@ -609,10 +609,112 @@ fn a_plan_that_is_only_validated_does_not_run_its_tasks() {
     let out = world.task_run("T-0012");
     assert_ne!(code(&out), 0, "a VALIDATED plan ran a task; {}", said(&out));
     assert_eq!(world.count("attempt"), 0, "an agent was launched");
-    assert!(
-        said(&out).contains("VALIDATED") || said(&out).to_lowercase().contains("approv"),
-        "the refusal must say the plan is not approved; {}",
+
+    // **Which mechanism refuses, named exactly.** It is *not* §4.3's plan-state
+    // gate: at `VALIDATED` nothing has been materialized, so there is no task
+    // row for that gate to judge, and the refusal is `NoSuchTask` — with the
+    // version listing appended so the operator learns why. That listing reads
+    // `v1 VALIDATED`, and the earlier form of this assertion accepted any
+    // occurrence of the word `VALIDATED`, so it passed **with the plan-state
+    // gate deleted** — a test that named one mechanism and held another.
+    // Asserting the two halves separately is what closes that gap; the gate
+    // itself is held by
+    // `a_materialized_task_under_a_non_authoritative_plan_version_is_refused_by_state`.
+    assert_eq!(
+        world.count("task"),
+        0,
+        "a plan short of APPROVED must materialize no task rows; {}",
         said(&out)
+    );
+    assert!(
+        said(&out).contains("no task T-0012 exists"),
+        "the refusal must be the un-materialized one, naming the task; {}",
+        said(&out)
+    );
+    assert!(
+        said(&out).contains("v1 VALIDATED"),
+        "and it must tell the operator the version's actual state; {}",
+        said(&out)
+    );
+}
+
+/// §4.3's plan-state gate, held against its own removal.
+///
+/// # Why this test is constructed rather than driven
+///
+/// Every path that creates a `task` row today requires `APPROVED` first —
+/// `plan approve` materializes, and `conductor recover` rebuilds a task list
+/// only for an approved version (*"no approved plan, so no task list to
+/// rebuild"*). So the gate's refusal arm is **not reachable from a current
+/// product path**, and that is precisely why nothing held it: the two negative
+/// controls that look like they cover it refuse for other reasons — one at
+/// §7.2's `2` because no project is registered at all, the other because
+/// nothing was materialized.
+///
+/// That makes the gate a fail-closed *invariant guard*, and the invariant is the
+/// one §4.3 rests on: **a task row executes only while its plan version is
+/// authoritative.** §3.1 makes the store local and disposable while
+/// `.conductor/` is authoritative, so the store is exactly the half that can
+/// come to disagree — and a guard against that is worth having whether or not
+/// today's writers can produce the disagreement. Deleting it must therefore
+/// fail a test rather than pass every test, which is what this one is for.
+///
+/// Verified non-vacuous: replacing the refusal arm with `_state => None` makes
+/// this test fail and leaves the other fifteen in this file green.
+#[test]
+fn a_materialized_task_under_a_non_authoritative_plan_version_is_refused_by_state() {
+    let world = World::new();
+    world.approve_ok(1);
+    assert_eq!(
+        world.count("task"),
+        1,
+        "the fixture depends on approval having materialized the task"
+    );
+
+    // The one arrangement that reaches the gate. A *terminal* task is refused
+    // earlier by §5.2's terminal check, and an unmaterialized one has no row —
+    // so the task must stay non-terminal while its version stops being
+    // authoritative.
+    {
+        let store = world.store();
+        let changed = store
+            .conn()
+            .execute("UPDATE plan_version SET state = 'VALIDATED'", [])
+            .expect("demote v1");
+        assert_eq!(changed, 1, "the demotion must actually land");
+    }
+
+    let out = world.task_run("T-0012");
+
+    assert_eq!(
+        code(&out),
+        1,
+        "§7.2's 1 — both halves were read and the answer was no; {}",
+        said(&out)
+    );
+    assert!(
+        said(&out).contains("belongs to plan v1, which is VALIDATED"),
+        "the refusal must be §4.3's plan-state gate, naming the state it found; {}",
+        said(&out)
+    );
+    assert!(
+        !said(&out).contains("no task T-0012 exists"),
+        "this must not be the un-materialized refusal — the row exists; {}",
+        said(&out)
+    );
+    assert_eq!(
+        world.count("attempt"),
+        0,
+        "an agent was launched under a plan version no human authorized"
+    );
+    assert_eq!(
+        world.count("run"),
+        0,
+        "a refusal that has already written a run row is not a refusal"
+    );
+    assert!(
+        !world.root().join("workspaces").exists(),
+        "a workspace was cloned for a task no approved plan authorizes"
     );
 }
 
