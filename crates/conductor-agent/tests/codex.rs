@@ -37,8 +37,11 @@ fn adapter() -> CodexAgent {
         PathBuf::from(WORKSPACE),
         PathBuf::from("/artifacts/r-0041/1/report-schema.json"),
     )
-    .with_prompt("Add a public `double` function to lib.rs and change nothing else.")
 }
+
+/// What the agent is asked to do. Per-attempt input since S12 — see
+/// [`conductor_agent::StartInput::instructions`].
+const INSTRUCTIONS: &str = "Add a public `double` function to lib.rs and change nothing else.";
 
 fn start_input() -> StartInput {
     StartInput {
@@ -48,6 +51,8 @@ fn start_input() -> StartInput {
         workspace: PathBuf::from(WORKSPACE),
         report_path: PathBuf::from("/artifacts/r-0041/1/report.json"),
         session_id: None,
+        instructions: INSTRUCTIONS.to_string(),
+        instructions_path: PathBuf::from("/artifacts/r-0041/1/packet.yaml"),
         env: Default::default(),
     }
 }
@@ -156,19 +161,20 @@ fn the_prompt_is_the_final_argument_and_an_empty_one_is_refused() {
     // forever on "Reading additional input from stdin...". `supervise::spawn`
     // gives the child `Stdio::null()`, so an empty prompt would hang the attempt
     // until the wall-clock budget killed it. Refusing is cheaper and truthful.
+    // And since S12 the prompt is [`StartInput::instructions`] — §6.5's packet,
+    // built by the worker once the workspace exists. This assertion is what makes
+    // "the packet reaches the agent" a fact about argv rather than about a field
+    // somebody set.
     let command = adapter().command(&start_input()).expect("command");
-    assert_eq!(
-        command.args.last().map(String::as_str),
-        Some("Add a public `double` function to lib.rs and change nothing else.")
-    );
+    assert_eq!(command.args.last().map(String::as_str), Some(INSTRUCTIONS));
 
-    let empty = CodexAgent::new(
-        PathBuf::from("/nonexistent/codex"),
-        PathBuf::from(WORKSPACE),
-        PathBuf::from("/artifacts/schema.json"),
-    );
-    let err = empty
-        .command(&start_input())
+    // The refusal now comes from an empty *instruction*, not an unset adapter
+    // field: the same measured hazard, moved to where the value actually lives.
+    let err = adapter()
+        .command(&StartInput {
+            instructions: "   ".to_string(),
+            ..start_input()
+        })
         .expect_err("an empty prompt must be refused");
     assert!(err.to_string().contains("stdin"), "{err}");
 }
@@ -773,6 +779,42 @@ fn resume_uses_the_thread_id_and_keeps_every_containment_flag() {
 #[test]
 fn the_adapter_id_is_stable() {
     assert_eq!(adapter().id(), "codex");
+}
+
+#[test]
+fn the_schema_constant_is_the_repository_artifact_and_not_a_second_copy() {
+    // S12's "one shipped artifact". §6.5's packet names a report schema by
+    // identity, and until S12 the schema existed **only** as a string literal in
+    // `codex.rs` while `schemas/agent-report.v1.json` — the path §6.5 wrote — did
+    // not exist at all. Two copies of a contract are two things that can
+    // disagree, and the one an agent is held to would be whichever a later editor
+    // happened to change.
+    //
+    // `include_str!` already makes this true at compile time; the test exists so
+    // that replacing it with a literal is a failure rather than a silent
+    // regression, and so the file's `$id` is pinned to what the packet reports.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("crates/conductor-agent has two ancestors");
+    let path = root.join("schemas/agent-report.v1.json");
+    let on_disk = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("§6.5's schema artifact must exist: {}: {e}", path.display()));
+
+    assert_eq!(
+        on_disk,
+        REPORT_SCHEMA_JSON,
+        "the constant and {} have diverged, so an agent is held to one contract \
+         and the repository documents another",
+        path.display()
+    );
+
+    let schema: serde_json::Value = serde_json::from_str(&on_disk).expect("the artifact is JSON");
+    assert_eq!(
+        schema["$id"], "agent-report.v1",
+        "the packet's `report_schema` reports this id, so it is part of the \
+         contract rather than decoration"
+    );
 }
 
 #[test]

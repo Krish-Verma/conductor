@@ -61,6 +61,7 @@ pub mod materialize;
 pub mod model;
 pub mod project;
 pub mod reconstruct;
+pub mod runnable;
 pub mod validate;
 
 pub use hash::{CANONICAL_VERSION, PlanHash, canonical_bytes, content_hash};
@@ -75,12 +76,20 @@ pub use model::{
 };
 pub use project::{PROJECT_CONFIG_PATH, Project, ProjectError};
 pub use reconstruct::{RebuiltVersion, ReconstructError, Reconstruction};
+pub use runnable::{Runnable, RunnableError};
 pub use validate::{
     IdKind, ManualCriterion, PlanDefect, ValidatedPlan, ValidationReport, check_ids, validate,
 };
 
 /// Where a project's plans live, relative to the repository root — §3.1.
 pub const PLANS_DIR: &str = ".conductor/plans";
+
+/// Where the check catalogue lives, relative to the repository root — §3.1.
+///
+/// Named here rather than in each caller because §3.7's catalogue, §4.5's
+/// profile and a task's `verification_profile` fallback are all this one file,
+/// and three spellings of it is three places a rename would have to be found.
+pub const VERIFICATION_CONFIG_PATH: &str = ".conductor/verification.yaml";
 
 /// The path of one plan version, relative to the repository root.
 ///

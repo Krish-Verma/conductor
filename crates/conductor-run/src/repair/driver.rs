@@ -38,7 +38,7 @@
 use std::path::PathBuf;
 
 use conductor_agent::AgentAdapter;
-use conductor_core::{Fence, RunId, RunState, TaskState};
+use conductor_core::{AttemptOutcome, Fence, RunId, RunState, TaskState};
 use conductor_store::{Store, StoreError};
 
 use super::breaker::{Decision, StopReason, decide};
@@ -317,6 +317,107 @@ pub fn repair_once(
         allowed.saturating_sub(spawned),
     );
 
+    // ---- and it is what the agent is told (wired at S12) --------------------
+    //
+    // Until here, this packet was **built and never delivered**: it was returned
+    // in `Attempted { packet, … }` for reporting, while the attempt itself was
+    // launched with whatever the caller had configured — which for every attempt
+    // of a run was the same thing. §6.5's `do_not_retry` list exists because
+    // *"that last field is what stops attempt 2 from being attempt 1 again"*, and
+    // attempt 2 had never seen it. Same class of defect as ADR-0017's: built,
+    // unit-tested, described in a completion report, and not on the product path.
+    //
+    // Composed onto the implementation packet rather than sent alone, because
+    // §6.5 says this packet *"adds only"* those six fields — a repairing agent
+    // still needs the objective, the scope, the acceptance criteria and the
+    // verification commands. A composition failure ends the repair rather than
+    // falling back to the plain implementation packet: that fallback is exactly
+    // "attempt 2 is attempt 1 again", silently.
+    // ---- which of §6.5's three packets this attempt gets ---------------------
+    //
+    // Part 9 specifies all three between rows 2, 3 and 7, and the discriminator is
+    // **how the previous attempt ended** — not what verification said about it:
+    //
+    // | row | previous attempt | next attempt is told |
+    // |-----|------------------|----------------------|
+    // | 2 | crashed, nothing survived | *"new attempt, **same packet**"* — the implementation packet |
+    // | 3 | crashed, work survived | *"verify current tree; **continuation packet**"* |
+    // | 7 | **exited**, verification failed | §4.6's repair packet |
+    //
+    // The verification result cannot be the discriminator, and that is the subtle
+    // part: `observation::observe` gives a verification failure precedence over the
+    // attempt's terminal state, so a crash whose surviving work then fails a check
+    // is `ObservationKind::Failed` — indistinguishable from row 7 by kind alone.
+    // What separates them is whether an agent ever *finished a turn*. An agent that
+    // exited made choices that can be wrong, and §6.5's `do_not_retry` list is
+    // about not repeating them. An agent that died made no choices worth avoiding;
+    // its successor needs to know what is already in the tree, which is what §6.5's
+    // continuation packet carries — together with the sentence saying the previous
+    // agent's reasoning is gone.
+    //
+    // `attempt.outcome` is durable (§5.2's eight attempt states), so this survives
+    // the restart §4.7 exists for.
+    let previous = previous_attempt(store, &run_id)?;
+    let unfinished = matches!(
+        previous.map(|(_, outcome)| outcome),
+        Some(AttemptOutcome::Crashed | AttemptOutcome::TimedOut | AttemptOutcome::Stale)
+    );
+
+    let chosen;
+    let vertical = if observations.is_empty() && !unfinished {
+        // Attempt 1: no history at all. The worker derives the implementation
+        // packet, which is what an attempt that is not a repair should get.
+        vertical
+    } else if unfinished {
+        // Rows 2 and 3. Measured, not assumed: `observe_run` re-observes the
+        // workspace against the baseline the dead attempt stored.
+        let (ordinal, _) = previous.expect("`unfinished` implies a previous attempt");
+        let observed = crate::packet::continuation::observe_run(
+            store,
+            &run_id,
+            &workspace,
+            &vertical.artifacts_root,
+            ordinal,
+            &task_scope(store, &run_id)?,
+            &vertical.sensitive,
+        );
+        if observed.is_empty() {
+            // Row 2: nothing survived, so there is no observed reality to add and
+            // §6.5's continuation packet would carry an empty half. The row says
+            // *"same packet"*, and this is it.
+            vertical
+        } else {
+            let continuation = crate::packet::continuation::build(store, &run_id, &observed)
+                .map_err(|e| {
+                    RepairError::NotDriveable(format!(
+                        "§6.5's continuation packet cannot be built for run {run_id}: {e}"
+                    ))
+                })?;
+            chosen = VerticalConfig {
+                instructions: Some(continuation.to_yaml()),
+                ..vertical.clone()
+            };
+            &chosen
+        }
+    } else {
+        // Row 7. Composed onto the implementation packet, because §6.5 says this
+        // packet *"adds only"* those six fields — a repairing agent still needs the
+        // objective, the scope, the criteria and the verification commands. A
+        // composition failure ends the repair rather than falling back to the plain
+        // implementation packet: that fallback is "attempt 2 is attempt 1 again",
+        // silently.
+        let composed = crate::packet::repair::build(store, &run_id, &packet).map_err(|e| {
+            RepairError::NotDriveable(format!(
+                "§6.5's repair packet cannot be composed for run {run_id}: {e}"
+            ))
+        })?;
+        chosen = VerticalConfig {
+            instructions: Some(composed.to_yaml()),
+            ..vertical.clone()
+        };
+        &chosen
+    };
+
     // ---- §4.6's session policy ---------------------------------------------
     //
     // "a stuck agent's context *is* the problem, and resuming re-imports the
@@ -385,6 +486,42 @@ pub fn repair_once(
         observation: observed,
         vertical: result,
     })))
+}
+
+/// The task's declared scope, read from the row the run belongs to.
+///
+/// The same value [`crate::vertical`] builds for reconciliation, from the same
+/// column, so the verdict this reports and the verdict the run was routed by
+/// cannot disagree about what was in scope.
+fn task_scope(store: &Store, run_id: &RunId) -> Result<conductor_git::Scope, RepairError> {
+    let run = store
+        .run(run_id)?
+        .ok_or_else(|| RepairError::NotDriveable(format!("run {run_id} vanished")))?;
+    let task_id = conductor_core::TaskId::new(run.task_id.clone())
+        .map_err(|e| RepairError::NotDriveable(e.to_string()))?;
+    let task = store
+        .task(&task_id)?
+        .ok_or_else(|| RepairError::NotDriveable(format!("no task {task_id}")))?;
+    Ok(conductor_git::Scope::new(task.scope_globs))
+}
+
+/// The highest-ordinal attempt this run has, and how it ended.
+///
+/// `None` before the first attempt. An attempt row with no `outcome` yet — one
+/// still in flight, or one whose worker died between `STARTING` and recording a
+/// terminal state — is reported as [`AttemptOutcome::Stale`], because that is what
+/// §5.2 means by `STALE`: *"we do not know"*, and unknown must not be recorded as
+/// known. It routes to the same place a crash does, which is the safe direction:
+/// the successor is told what is in the tree rather than what to avoid.
+fn previous_attempt(
+    store: &Store,
+    run_id: &RunId,
+) -> Result<Option<(i64, AttemptOutcome)>, RepairError> {
+    Ok(store
+        .attempts_for_run(run_id)?
+        .into_iter()
+        .max_by_key(|row| row.ordinal)
+        .map(|row| (row.ordinal, row.outcome.unwrap_or(AttemptOutcome::Stale))))
 }
 
 /// How many times an agent has been started for this run — the durable count.

@@ -78,6 +78,8 @@ fn harness(root: &Path, scope: &[&str], supervisor: SupervisorConfig) -> WorkerC
         // The fake agent authenticates against nothing.
         credential_home: None,
         agent_session_id: None,
+        // The worker derives §6.5's implementation packet — this is not a repair.
+        instructions: None,
     }
 }
 
@@ -90,7 +92,7 @@ fn setup_with(scope: &[&str], supervisor: SupervisorConfig) -> Harness {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = common::agent::source_repo(dir.path());
     let mut store = Store::open_or_create(dir.path().join("conductor.db")).expect("store");
-    seed_run(&mut store, &common::agent::head(&source));
+    seed_run(&mut store, &common::agent::head(&source), &source);
     let config = harness(dir.path(), scope, supervisor);
     Harness {
         _dir: dir,
@@ -99,26 +101,18 @@ fn setup_with(scope: &[&str], supervisor: SupervisorConfig) -> Harness {
     }
 }
 
-fn seed_run(store: &mut Store, base_commit: &str) {
+/// Seed the parent rows and the run these scenarios drive.
+///
+/// `source` is the **registered tree**, real since S12: §6.5's packet is generated
+/// from durable state plus the plan document in that tree, so a project row
+/// pointing at `/fixture` means an attempt with nothing to tell the agent.
+fn seed_run(store: &mut Store, base_commit: &str, source: &std::path::Path) {
+    common::vertical::seed_parents_at(store, source);
     conductor_store::with_immediate(store.conn_mut(), |tx| {
-        tx.execute(
-            "INSERT INTO project (id, root_path, repo_identity, default_branch, config_hash, created_at)
-             VALUES ('p-1', '/fixture', 'blake3:repo', 'main', 'blake3:cfg', 0)",
-            [],
-        )?;
-        tx.execute(
-            "INSERT INTO plan_version (id, project_id, version, content_hash, state, source_path)
-             VALUES ('pv-1', 'p-1', 1, 'blake3:plan', 'APPROVED', 'plan.yaml')",
-            [],
-        )?;
-        tx.execute(
-            "INSERT INTO policy_snapshot (hash, canonical_blob, created_at) VALUES (?1, '{}', 0)",
-            rusqlite::params![common::agent::POLICY_HASH],
-        )?;
         tx.execute(
             "INSERT INTO task (id, plan_version_id, slice_id, state, scope_globs,
                                verification_profile, attempt_budget, created_at)
-             VALUES ('T-0012', 'pv-1', 'S3', 'READY', '[\"src/**\"]', 'default', 3, 0)",
+             VALUES ('T-0012', 'pv-1', 'S3', 'READY', '[\"src/**\"]', '.conductor/verification.yaml', 3, 0)",
             [],
         )?;
         tx.execute(

@@ -64,7 +64,40 @@ fn completing() -> SupervisorConfig {
 fn a_successful_agent_is_spawned_streamed_and_reaped() {
     warm_the_binary();
     let dir = tempfile::tempdir().expect("tempdir");
-    let scenario = scenario_file(dir.path(), "success");
+    // The catalogued `success` scenario **cannot** be used here, and the reason
+    // is a measured host fact rather than a preference. It "exits in
+    // single-digit milliseconds" (see
+    // `the_heartbeat_callback_sees_a_live_child_and_stops_seeing_one_when_it_dies`),
+    // so under the parallel load of this binary's other fourteen tests the child
+    // can finish before the parent reaches the liveness assertion below. A child
+    // that has exited and not yet been reaped is a **zombie**, and S11 measured
+    // that `proc_pidinfo` fails with `ESRCH` for a zombie on this host —
+    // deterministically, 300/300 against a 0/300 control. So `start_time_us`
+    // answers `None`, `probe` answers `Liveness::Dead`, and it is *right* to:
+    // the process really is gone. The assertion was reading a transient state
+    // the product never promised, and it failed at roughly 1 run in 10.
+    //
+    // The fix is to make the state the assertion names actually hold: the same
+    // steps as `success`, with a sleep that gives the child a lifetime long
+    // enough to be observed. The sleep is placed **after** the first emit, not
+    // before it, so the supervisor's startup timer still sees output
+    // immediately — a sleep at the front would trade this race for the one
+    // `an_agent_that_never_speaks_is_a_startup_timeout_not_a_stall` covers.
+    let scenario = common::agent::write_scenario(
+        dir.path(),
+        r#"{
+          "id": "success-observably-alive",
+          "steps": [
+            {"step":"emit","kind":"agent.started","detail":"success"},
+            {"step":"sleep_ms","ms":250},
+            {"step":"write_file","path":"src/added.rs","contents":"pub fn added() -> u32 { 1 }\n"},
+            {"step":"emit","kind":"file.written","detail":"src/added.rs"},
+            {"step":"checkpoint","name":"after-edits"},
+            {"step":"report_on_stdout","claim":"COMPLETE","files_touched":["src/added.rs"],"summary":"added a function"},
+            {"step":"exit","code":0}
+          ]
+        }"#,
+    );
     let adapter = FakeAgent::new(fake_agent_binary(), scenario);
     let input = start_input(dir.path());
     let command = adapter.command(&input).expect("command");
@@ -72,7 +105,14 @@ fn a_successful_agent_is_spawned_streamed_and_reaped() {
     let agent = spawn(&command).expect("spawn");
     let pid = agent.pid();
     assert!(pid > 0);
-    assert!(matches!(agent.liveness(), Liveness::Alive(_)));
+    // Named rather than matched bare: a recurrence must say *which* variant it
+    // saw, because `Dead`, `Recycled` and `Unidentified` are three different
+    // defects and the original `matches!` could not tell them apart.
+    let observed = agent.liveness();
+    assert!(
+        matches!(observed, Liveness::Alive(_)),
+        "spawn must return a child with an established identity; liveness was {observed:?}"
+    );
 
     let supervised = agent.supervise(&adapter, &completing(), |_| {});
 

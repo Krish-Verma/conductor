@@ -109,27 +109,16 @@ use crate::{
 /// The adapter never writes this file — that is I/O, and §6.1 keeps I/O out of
 /// adapters. `conductor-run` writes it into the attempt's artifact directory and
 /// passes the path to [`CodexAgent::new`].
-pub const REPORT_SCHEMA_JSON: &str = r#"{
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["claim", "files_touched", "summary"],
-  "properties": {
-    "claim": {
-      "type": "string",
-      "enum": ["COMPLETE", "PARTIAL", "FAILED"],
-      "description": "COMPLETE only if the task is finished; PARTIAL if progress was made but work remains; FAILED if the task could not be done."
-    },
-    "files_touched": {
-      "type": "array",
-      "items": { "type": "string" },
-      "description": "Every file created, modified or deleted, as a path relative to the workspace root."
-    },
-    "summary": {
-      "type": "string",
-      "description": "One paragraph describing what was changed and why."
-    }
-  }
-}"#;
+///
+/// # One artifact, included rather than duplicated (S12)
+///
+/// The schema used to be a string literal here, and `schemas/agent-report.v1.json`
+/// — the path §6.5's packet names — did not exist. Two copies of a contract are
+/// two things that can disagree, and the one an agent is held to would have been
+/// whichever a later editor happened to change. `include_str!` makes the
+/// repository file the only copy: the crate does not build without it, and editing
+/// it changes what every agent is asked to produce.
+pub const REPORT_SCHEMA_JSON: &str = include_str!("../../../schemas/agent-report.v1.json");
 
 /// The Codex adapter.
 ///
@@ -144,7 +133,6 @@ pub struct CodexAgent {
     binary: PathBuf,
     workspace: PathBuf,
     output_schema: PathBuf,
-    prompt: String,
 }
 
 impl CodexAgent {
@@ -155,25 +143,18 @@ impl CodexAgent {
     /// business touching the filesystem, and `tests/codex.rs` relies on being
     /// able to build commands for a `codex` that does not exist.
     ///
-    /// The prompt is set separately by [`CodexAgent::with_prompt`] because it is
-    /// the one input that changes between attempts of the same run: a repair
-    /// attempt gets a repair packet (§6.5), not the original instruction.
+    /// **The instruction is not adapter state (changed at S12).** It arrives on
+    /// [`StartInput::instructions`], because §6.5's packet cannot be built until
+    /// the workspace exists and §4.6 gives attempt 2 a *different* one. A
+    /// `with_prompt` used to set it here, which meant an adapter constructed
+    /// before the run could only ever carry something less than a packet — and
+    /// every attempt of a run would carry the same one.
     pub fn new(binary: PathBuf, workspace: PathBuf, output_schema: PathBuf) -> Self {
         CodexAgent {
             binary,
             workspace,
             output_schema,
-            prompt: String::new(),
         }
-    }
-
-    /// Set the prompt this attempt runs.
-    ///
-    /// It becomes the final argv element. It is not passed on stdin: see this
-    /// module's fourth measured finding.
-    pub fn with_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.prompt = prompt.into();
-        self
     }
 
     /// The workspace this adapter normalises reported paths against.
@@ -219,7 +200,7 @@ impl CodexAgent {
                 input.workspace.display()
             )));
         }
-        if self.prompt.trim().is_empty() {
+        if input.instructions.trim().is_empty() {
             return Err(AgentError::Unusable(
                 "codex exec with no prompt argument blocks forever reading stdin, \
                  and the supervisor gives the child a null stdin that will never \
@@ -373,8 +354,10 @@ impl AgentAdapter for CodexAgent {
 
         let mut args = vec!["exec".to_string()];
         args.extend(self.common_args(&input.report_path));
-        // Last, because it is the positional PROMPT.
-        args.push(self.prompt.clone());
+        // Last, because it is the positional PROMPT. §6.5's packet, which the
+        // worker built once the workspace existed — see `StartInput::instructions`
+        // for why this cannot be adapter state.
+        args.push(input.instructions.clone());
 
         Ok(AgentCommand {
             program: self.binary.clone(),
@@ -481,7 +464,7 @@ impl AgentAdapter for CodexAgent {
             input.session_id.clone(),
         ];
         args.extend(self.common_args(&input.start.report_path));
-        args.push(self.prompt.clone());
+        args.push(input.start.instructions.clone());
 
         Some(AgentCommand {
             program: self.binary.clone(),

@@ -134,6 +134,8 @@ fn main() {
         credential_home: None,
         // S3's worker runs one attempt; §4.6's session policy is repair's.
         agent_session_id: None,
+        // The worker derives §6.5's implementation packet — this is not a repair.
+        instructions: None,
     };
 
     let Some(claimed) = store

@@ -68,6 +68,32 @@ pub enum Step {
         /// Workspace-relative path.
         path: String,
     },
+    /// Do the work **the packet describes**, reading nothing else.
+    ///
+    /// # Why this step exists (S12's Verify line)
+    ///
+    /// > An agent handed **only** a continuation packet completes a task
+    /// > interrupted mid-way, on a fixture, **with no session resume**.
+    ///
+    /// Every other step here is scripted: the scenario file says what to write, so
+    /// a test built from them proves nothing about whether the *packet* carried
+    /// enough — the agent would have finished the task with an empty packet just as
+    /// well. That is the vacuity ADR-0006 is about, and asserting the Verify line
+    /// with a scripted step would be an instance of it.
+    ///
+    /// So this step takes **no parameters**. It opens the packet at
+    /// `CONDUCTOR_FAKE_PACKET`, finds the acceptance criteria and the scope, and
+    /// writes the file the packet's own `objective` names. If the packet is missing,
+    /// unreadable, or does not carry those fields, the step fails and says which —
+    /// so a packet that stopped being sufficient breaks the test rather than
+    /// silently passing it.
+    ///
+    /// What it is **not**: evidence that a reasoning agent can use the packet. It
+    /// is evidence that the packet contains the information, and that no hidden
+    /// session state is required to act on it — which is precisely S12's stop
+    /// point, *"recovery does not depend on hidden state"*. The real-agent half is
+    /// a separate, `#[ignore]`d test.
+    FinishFromPacket,
     /// Run `git` inside the workspace.
     Git {
         /// Arguments after `git`.

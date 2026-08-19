@@ -94,12 +94,26 @@ Do not violate these without an ADR that first shows a current acceptance-suite 
 
 ## Current status
 
-Design complete. **S0–S11 done. S12 (packets and reports) not started.**
+Design complete. **S0–S12 done. S13 (review bridge) not started.**
+S12 is on `s12-packets`, not yet merged to `main`.
 
 S9 was the hard gate: no real coding agent runs through Conductor before it
 passes. It has. S10 shipped the Codex adapter; S11 shipped the plan ledger,
 decisions, and the §3.5 recovery path that makes "project truth outlives
 execution state" executable rather than aspirational.
+
+S12 shipped the packets — and found that the two things it depended on had been
+built, unit-tested and reported complete while being **unreachable from the product
+path**: `conductor task run` never used S11's plan ledger (ADR-0017), and none of
+§6.5's packets was ever delivered to an agent (ADR-0018). The repair packet was the
+sharpest case: the driver built it, returned it for *reporting*, and launched the
+attempt with something else, so the `do_not_retry` list that exists to stop attempt 2
+from repeating attempt 1 had never been seen by attempt 2. S6's test asserted the
+packet's contents from that returned value; its **name** claimed delivery.
+
+The lesson is now a standing check, not a war story: **for every mechanism a slice
+reports complete, name its product call site.** Both defects are invisible to any
+test that starts below the CLI, and both survived a slice that declared them done.
 
 Keep this line current. It was stale from S1 through S11 in the master plan's
 own header and from S9 through S11 here, which is how a status note stops being

@@ -6,13 +6,41 @@
 //! non-success outcome and "must be distinguishable from failure by a wrapper
 //! script". A test that only checked "non-zero" would not notice the day it
 //! became 1.
+//!
+//! # Why the fixture is a plan and not a spec (S12)
+//!
+//! Until S12 every test here wrote `.conductor/task.yaml`, the S5-era task spec,
+//! and `task run` read it. That file was never the authority §3.2 describes — *"a
+//! plan is a file you write"* — and the command that read it fabricated a
+//! `plan_version` row at `version 0`, `state DRAFT` to satisfy §5.1's foreign
+//! key. So the fixture below is a real `.conductor/` layout and v1 is **approved
+//! over the control socket** before anything runs, because that is now the only
+//! way a task row exists at all.
+//!
+//! The subject of this file did not change: it is still §7.2's exit codes and
+//! what `task show` / `task list` report. `tests/task_run_plan.rs` owns the
+//! question of *which* plan authorizes a run; the assertions here deliberately
+//! do not restate it.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+use conductor_store::Store;
 
 const CONDUCTOR: &str = env!("CARGO_BIN_EXE_conductor");
 
-/// The verification profile the fixture task names.
+/// §3.1's project file. `adapter: fake` is declared even though every run below
+/// passes `--adapter fake`, because `runnable::resolve` reads this file to learn
+/// which project it is looking at — a repository without it is not a project.
+const PROJECT_YAML: &str = r#"
+project:
+  id: p-task
+  default_branch: main
+  adapter: fake
+"#;
+
+/// The verification profile the fixture plan's task names.
 const PROFILE: &str = r#"
 verification:
   toolchain_fingerprint:
@@ -34,14 +62,73 @@ verification:
       timeout_seconds: 60
 "#;
 
-/// S5's minimal task spec — the file Part 8 asks for, and the whole of it.
-const SPEC: &str = r#"
-id: T-0012
-objective: Add a greeting helper to the library.
-scope:
-  - "src/**"
-verification_profile: .conductor/verification.yaml
-attempt_budget: 3
+const POLICY_YAML: &str = r#"
+policy:
+  rules: []
+"#;
+
+/// The plan every test here runs against: one task, one bound criterion.
+///
+/// `verification_profile` is a path relative to the repository root, which is
+/// what §4.5's clarification 3 settles to.
+const PLAN_V1: &str = r#"
+plan:
+  id: p-task
+  version: 1
+  objective: "Prove §7.2's exit codes on the core verb."
+  milestones:
+    - id: M-01
+      title: "The core verb"
+      slices:
+        - id: S-01
+          title: "task run"
+          tasks:
+            - id: T-0012
+              objective: "Add a greeting helper to the library."
+              rationale: "The exit-code tests need a task that changes a file."
+              depends_on: []
+              scope:
+                allowed_globs: ["src/**"]
+                forbidden_globs: [".conductor/**"]
+              verification_profile: .conductor/verification.yaml
+              attempt_budget: 3
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "The library gains a function."
+                  verified_by: [unit-tests]
+"#;
+
+/// The same plan naming a verification profile that is not in the repository.
+///
+/// §3.7 does not refuse this — the validator is given the check catalogue and
+/// deliberately does not resolve per-task profile *paths* — so a plan can be
+/// approved and still name a document `task run` cannot read. That makes this
+/// the refusal `task run` itself owns, and the one the deleted spec test used to
+/// stand for.
+const PLAN_WITH_MISSING_PROFILE: &str = r#"
+plan:
+  id: p-task
+  version: 1
+  objective: "Prove a task with no readable profile never starts."
+  milestones:
+    - id: M-01
+      title: "The core verb"
+      slices:
+        - id: S-01
+          title: "task run"
+          tasks:
+            - id: T-0012
+              objective: "Work nothing could ever prove."
+              rationale: "A task whose criteria bind to a document that is absent."
+              depends_on: []
+              scope:
+                allowed_globs: ["src/**"]
+              verification_profile: .conductor/there-is-no-such-profile.yaml
+              attempt_budget: 3
+              acceptance_criteria:
+                - id: AC-1
+                  statement: "The library gains a function."
+                  verified_by: [unit-tests]
 "#;
 
 /// An agent that does the work and reports it.
@@ -60,14 +147,19 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Fixture {
+        Fixture::with_plan(PLAN_V1)
+    }
+
+    fn with_plan(plan: &str) -> Fixture {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().canonicalize().expect("canonicalize");
         let repo = root.join("repo");
         std::fs::create_dir_all(repo.join("src")).expect("mkdir");
-        std::fs::create_dir_all(repo.join(".conductor")).expect("mkdir");
         std::fs::write(repo.join("src/lib.rs"), "pub fn base() -> u32 { 0 }\n").expect("write");
-        std::fs::write(repo.join(".conductor/task.yaml"), SPEC).expect("write");
-        std::fs::write(repo.join(".conductor/verification.yaml"), PROFILE).expect("write");
+        write(&repo, ".conductor/project.yaml", PROJECT_YAML);
+        write(&repo, ".conductor/verification.yaml", PROFILE);
+        write(&repo, ".conductor/policy.yaml", POLICY_YAML);
+        write(&repo, ".conductor/plans/v1/plan.yaml", plan);
 
         git(&repo, &["init", "-q", "--initial-branch=main"]);
         git(&repo, &["config", "user.name", "Fixture"]);
@@ -77,6 +169,11 @@ impl Fixture {
         git(&repo, &["commit", "-q", "-m", "initial"]);
 
         std::fs::write(root.join("scenario.json"), SCENARIO).expect("write");
+        // `approval serve` refuses to create a store — §7.2's `2` is "store
+        // unhealthy", and a control socket that conjured a database would be a
+        // second way for project truth to appear. The fixture creates it, as an
+        // operator's `conductor init` would have left it.
+        Store::open_or_create(root.join("conductor.db")).expect("create the store");
         Fixture { dir, repo }
     }
 
@@ -86,6 +183,16 @@ impl Fixture {
 
     fn store(&self) -> String {
         self.root().join("conductor.db").display().to_string()
+    }
+
+    /// Deliberately short, and **not** canonicalized: a `sockaddr_un` path is
+    /// capped at `SUN_LEN`, macOS resolves `/var/folders/…` to a `/private`
+    /// prefix eight characters longer, and the bind goes through a
+    /// `.<name>.<pid>.staging` sibling that adds sixteen more. A descriptive
+    /// name here fails as "path must be shorter than SUN_LEN", which reads like
+    /// a Conductor defect and is not one.
+    fn socket(&self) -> PathBuf {
+        self.dir.path().join("cs").join("s")
     }
 
     fn fake_agent(&self) -> String {
@@ -102,6 +209,32 @@ impl Fixture {
             path.display()
         );
         path.display().to_string()
+    }
+
+    /// Make v1 authoritative the way §5.2 requires: a human at the control
+    /// socket. The server lives only for the call, so nothing else here shares
+    /// the store with it.
+    fn approve_ok(&self, version: u32) {
+        let out = {
+            let _server = Server::start(self);
+            run(&[
+                "plan",
+                "approve",
+                &version.to_string(),
+                "--repo",
+                &self.repo.display().to_string(),
+                "--socket",
+                &self.socket().display().to_string(),
+                "--json",
+            ])
+        };
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "approving v{version}:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// `conductor task run T-0012 --json`, with the fixture's plumbing.
@@ -135,11 +268,74 @@ impl Fixture {
     }
 }
 
+/// A `conductor approval serve` process and the socket it published.
+struct Server {
+    child: Child,
+}
+
+impl Server {
+    fn start(fixture: &Fixture) -> Server {
+        let socket = fixture.socket();
+        std::fs::create_dir_all(socket.parent().expect("a parent")).expect("mkdir socket");
+        let child = Command::new(CONDUCTOR)
+            .args([
+                "approval",
+                "serve",
+                "--store",
+                &fixture.store(),
+                "--socket",
+                &socket.display().to_string(),
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawn {CONDUCTOR}: {e}"));
+        let mut server = Server { child };
+        // Generous, because M29 measured macOS taking 21.7 s to scan a freshly
+        // built binary before its first instruction runs.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < deadline {
+            if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+                return server;
+            }
+            if let Ok(Some(status)) = server.child.try_wait() {
+                use std::io::Read;
+                let mut said = String::new();
+                if let Some(mut err) = server.child.stderr.take() {
+                    let _ = err.read_to_string(&mut said);
+                }
+                if let Some(mut out) = server.child.stdout.take() {
+                    let _ = out.read_to_string(&mut said);
+                }
+                panic!(
+                    "the control socket server exited {status} before listening at {}: {said}",
+                    socket.display()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("nothing was listening at {}", socket.display());
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 fn run(args: &[&str]) -> Output {
     Command::new(CONDUCTOR)
         .args(args)
         .output()
         .unwrap_or_else(|e| panic!("spawn {CONDUCTOR}: {e}"))
+}
+
+fn write(root: &Path, relative: &str, text: &str) {
+    let path = root.join(relative);
+    std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+    std::fs::write(&path, text).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
 }
 
 fn json(out: &Output) -> serde_json::Value {
@@ -182,6 +378,7 @@ fn git_out(repo: &Path, args: &[&str]) -> String {
 #[test]
 fn a_successful_task_exits_zero_and_reports_its_commit() {
     let f = Fixture::new();
+    f.approve_ok(1);
     let out = f.task_run(&[]);
 
     assert_eq!(
@@ -213,7 +410,13 @@ fn a_successful_task_exits_zero_and_reports_its_commit() {
 fn a_verification_failure_exits_five() {
     // §7.2: "5 verification failed". Distinct from 3, because a failing check is
     // not a human decision — §4.5 sends it to repair.
+    //
+    // The profile is swapped *after* approval on purpose: §3.6 hashes the plan
+    // document, and swapping a check's command is a change to what proves the
+    // task rather than to what the task is. A human does not re-approve a plan
+    // because a test started failing.
     let f = Fixture::new();
+    f.approve_ok(1);
     std::fs::write(f.repo.join(".conductor/verification.yaml"), FAILING_PROFILE)
         .expect("write profile");
 
@@ -238,6 +441,7 @@ fn a_run_that_needs_a_human_exits_three() {
     // needed'". Acceptance row 6: a false-success report is `CONTRADICTED` and
     // halts.
     let f = Fixture::new();
+    f.approve_ok(1);
     std::fs::write(
         f.root().join("scenario.json"),
         r#"{"id":"cli-false-success","steps":[
@@ -262,16 +466,23 @@ fn a_run_that_needs_a_human_exits_three() {
 fn exit_three_is_distinguishable_from_exit_one() {
     // The property §7.2 actually asks for, asserted as a property rather than as
     // two separate numbers: "must be distinguishable from failure".
-    let f = Fixture::new();
-    std::fs::write(f.repo.join(".conductor/task.yaml"), "id: T-0012\n").expect("write");
+    //
+    // The non-3 half is a plan naming a verification profile that is not there —
+    // a configuration mistake, which is what the deleted `task.yaml` half of
+    // this test used to be. It must not read as "a human is needed", because no
+    // decision would fix it.
+    let f = Fixture::with_plan(PLAN_WITH_MISSING_PROFILE);
+    f.approve_ok(1);
     let broken = f.task_run(&[]);
     assert_ne!(
         broken.status.code(),
         Some(3),
-        "an invalid spec is not 'a human is needed'"
+        "an unreadable verification profile is not 'a human is needed': {}",
+        String::from_utf8_lossy(&broken.stderr)
     );
 
     let g = Fixture::new();
+    g.approve_ok(1);
     std::fs::write(
         g.root().join("scenario.json"),
         r#"{"id":"x","steps":[{"step":"report_on_stdout","claim":"COMPLETE",
@@ -285,6 +496,13 @@ fn exit_three_is_distinguishable_from_exit_one() {
 fn an_unhealthy_store_exits_two() {
     // §7.2: "2 no project / not initialized / store unhealthy".
     let f = Fixture::new();
+    f.approve_ok(1);
+    // The sidecars go too. A `-wal` left beside a replaced main file describes a
+    // database that is no longer there, and the test would then be measuring
+    // SQLite's recovery path rather than Conductor's refusal.
+    for sidecar in ["conductor.db-wal", "conductor.db-shm"] {
+        let _ = std::fs::remove_file(f.root().join(sidecar));
+    }
     std::fs::write(f.root().join("conductor.db"), b"this is not a database").expect("write");
     let out = f.task_run(&[]);
     assert_eq!(
@@ -296,54 +514,36 @@ fn an_unhealthy_store_exits_two() {
 }
 
 #[test]
-fn an_invalid_task_spec_is_refused_before_anything_runs() {
-    // §3.7's smallest version: a task with no verification profile is "the
-    // mechanism by which a task reaches `COMPLETE` on an agent's word".
-    let f = Fixture::new();
-    std::fs::write(
-        f.repo.join(".conductor/task.yaml"),
-        "id: T-0012\nobjective: do a thing\nscope: [\"src/**\"]\nverification_profile: \"\"\n",
-    )
-    .expect("write");
+fn a_task_naming_a_verification_profile_that_is_not_there_is_refused_before_anything_runs() {
+    // §3.7's smallest version, on the authority that replaced the task spec: an
+    // acceptance criterion bound to a document Conductor cannot read is "the
+    // mechanism by which a task reaches `COMPLETE` on an agent's word". §3.7
+    // itself cannot catch it — the validator is handed the check catalogue and
+    // does not resolve per-task profile paths — so `task run` must, and it must
+    // do it before an agent has edited anything.
+    let f = Fixture::with_plan(PLAN_WITH_MISSING_PROFILE);
+    f.approve_ok(1);
 
     let out = f.task_run(&[]);
     assert_ne!(out.status.code(), Some(0));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("verification"),
+        stderr.contains("verification_profile"),
         "the refusal must say which field is wrong: {stderr}"
     );
-    // Nothing was created on the strength of an unusable spec.
+    // Nothing was created on the strength of a task nothing could prove.
     assert!(!f.root().join("workspaces").exists());
 }
 
-#[test]
-fn a_task_id_that_does_not_match_the_spec_is_refused() {
-    let f = Fixture::new();
-    let out = f.task_run(&[
-        "--spec",
-        &f.repo.join(".conductor/task.yaml").display().to_string(),
-    ]);
-    assert_eq!(out.status.code(), Some(0), "control: the ids do match");
-
-    let g = Fixture::new();
-    let mut args = vec!["task", "run", "T-9999", "--json", "--repo"];
-    let repo = g.repo.display().to_string();
-    args.push(&repo);
-    let store = g.store();
-    args.extend(["--store", &store]);
-    let agent = g.fake_agent();
-    args.extend(["--adapter", "fake", "--agent-binary", &agent]);
-    let scenario = g.root().join("scenario.json").display().to_string();
-    args.extend(["--scenario", &scenario]);
-    let out = run(&args);
-    assert_ne!(out.status.code(), Some(0));
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("T-9999"),
-        "the refusal must name the id that was asked for: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
+// `a_task_id_that_does_not_match_the_spec_is_refused` lived here until S12.
+//
+// It asserted that `task run T-9999` was refused when `.conductor/task.yaml`
+// declared `T-0012`, which was a statement about a file that no longer exists.
+// The surviving invariant — a task the approved plan does not declare is refused
+// by name — is asserted in `tests/task_run_plan.rs::
+// a_task_the_approved_plan_does_not_declare_is_refused_by_name`, against the
+// authority that now decides it. A second copy here would be a second thing to
+// keep in agreement, so the coverage moved rather than went away.
 
 // ---------------------------------------------------------------------------
 // task show / task list
@@ -354,6 +554,7 @@ fn show_reports_state_attempts_verification_and_findings() {
     // §7.1: "`conductor task show <task-id>` — state, attempts, verification,
     // findings, diff".
     let f = Fixture::new();
+    f.approve_ok(1);
     assert_eq!(f.task_run(&[]).status.code(), Some(0));
 
     let out = f.task(&["show", "T-0012", "--json"]);
@@ -401,6 +602,7 @@ fn show_reports_state_attempts_verification_and_findings() {
 #[test]
 fn show_refuses_a_task_that_does_not_exist() {
     let f = Fixture::new();
+    f.approve_ok(1);
     assert_eq!(f.task_run(&[]).status.code(), Some(0));
     let out = f.task(&["show", "T-9999", "--json"]);
     assert_ne!(out.status.code(), Some(0));
@@ -415,6 +617,7 @@ fn show_refuses_a_task_that_does_not_exist() {
 fn list_reports_every_task_and_filters_by_state() {
     // §7.1: "`conductor task list [--state …]`".
     let f = Fixture::new();
+    f.approve_ok(1);
     assert_eq!(f.task_run(&[]).status.code(), Some(0));
 
     let out = f.task(&["list", "--json"]);
@@ -437,6 +640,7 @@ fn an_unknown_state_filter_is_a_usage_error() {
     // §7.2: "64 usage error (EX_USAGE)". A typo'd state must not silently match
     // nothing — that reads as "no such tasks" and is a different answer.
     let f = Fixture::new();
+    f.approve_ok(1);
     assert_eq!(f.task_run(&[]).status.code(), Some(0));
     let out = f.task(&["list", "--state", "NOT_A_STATE", "--json"]);
     assert_eq!(out.status.code(), Some(64));
@@ -447,6 +651,7 @@ fn every_task_command_renders_without_json_too() {
     // §7.1: "`--json` on every command" — which implies a human rendering as
     // well, and a `--json` flag that changes only the rendering.
     let f = Fixture::new();
+    f.approve_ok(1);
     assert_eq!(f.task_run(&[]).status.code(), Some(0));
 
     for args in [vec!["show", "T-0012"], vec!["list"]] {

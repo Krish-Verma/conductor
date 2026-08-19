@@ -121,6 +121,7 @@ fn run_step(step: &Step, workspace: &Path, report_path: Option<&Path>) {
         Step::DeleteFile { path } => {
             let _ = std::fs::remove_file(workspace.join(path));
         }
+        Step::FinishFromPacket => finish_from_packet(workspace, report_path),
         Step::Git { args } => {
             let output = Command::new("git")
                 .args(args)
@@ -254,6 +255,105 @@ fn emit(line: &str) {
     // kill the process before the line the test is waiting for ever arrives,
     // which is the deadlock every "just add a sleep" harness eventually grows.
     let _ = lock.flush();
+}
+
+/// Do the work §6.5's packet describes, reading nothing but the packet.
+///
+/// S12's Verify line, mechanised. See [`Step::FinishFromPacket`] for why this step
+/// takes no parameters: a scripted step would prove the *scenario* was sufficient,
+/// not the packet.
+///
+/// The "work" is deliberately trivial and deliberately **derived**: the packet's
+/// `objective` names a file, this writes it, and the report it files names the
+/// criteria the packet listed. Nothing here knows the fixture. A packet that stopped
+/// carrying an objective, a scope or its criteria makes this fail and say which —
+/// which is the property the Verify line actually needs.
+fn finish_from_packet(workspace: &Path, report_path: Option<&Path>) {
+    let refuse = |why: &str| {
+        emit(&format!(
+            "{{\"kind\":\"agent.error\",\"message\":{}}}",
+            json_string(&format!("cannot finish from the packet: {why}"))
+        ));
+    };
+
+    let Some(path) = std::env::var_os(conductor_agent::fake::PACKET_ENV) else {
+        return refuse("no packet was supplied");
+    };
+    let path = PathBuf::from(path);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return refuse(&format!("{} is unreadable", path.display()));
+    };
+
+    // The packet is YAML, and this reads it with two `find`s rather than a parser:
+    // the fake agent is a stand-in for a *model*, which is handed prose and picks
+    // the facts out of it. A structured read here would test a parser nobody ships.
+    let field = |key: &str| -> Option<String> {
+        text.lines()
+            .find(|l| l.trim_start().starts_with(key))
+            .and_then(|l| l.split_once(':'))
+            .map(|(_, v)| v.trim().trim_matches(['"', '\'']).to_string())
+            .filter(|v| !v.is_empty())
+    };
+
+    let Some(objective) = field("objective:") else {
+        return refuse("the packet carries no objective");
+    };
+    if !text.contains("acceptance_criteria") {
+        return refuse("the packet carries no acceptance criteria");
+    }
+    if !text.contains("allowed_globs") {
+        return refuse("the packet carries no scope");
+    }
+
+    // The file to write is named in the objective. §3.7 makes the objective the
+    // field that tells an agent what to do, so a fixture whose objective does not
+    // name its artifact is a fixture, not a product, problem — and it fails here
+    // rather than producing a run that looks successful.
+    // Punctuation trimmed before matching: an objective is a **sentence** a human
+    // wrote, so the path in it is followed by a full stop as often as not, and
+    // `"src/greeting.rs."` does not end with `.rs`.
+    let Some(target) = objective
+        .split_whitespace()
+        .map(|w| w.trim_matches(['.', ',', ';', ':', '`', '"', '\'', ')', '(']))
+        .find(|w| w.ends_with(".rs"))
+    else {
+        return refuse(&format!(
+            "the objective names no file to write: {objective:?}"
+        ));
+    };
+    let target = workspace.join(target);
+    if let Some(parent) = target.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(error) = std::fs::write(&target, "pub fn finished() -> u32 { 1 }\n") {
+        return refuse(&format!("write {}: {error}", target.display()));
+    }
+    emit(&format!(
+        "{{\"kind\":\"file.changed\",\"path\":{}}}",
+        json_string(&target.display().to_string())
+    ));
+
+    // …and a report, whose `files_touched` is what this actually wrote.
+    if let Some(report) = report_path {
+        if let Some(parent) = report.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let touched = vec![
+            target
+                .strip_prefix(workspace)
+                .unwrap_or(&target)
+                .display()
+                .to_string(),
+        ];
+        let _ = std::fs::write(
+            report,
+            report_json(
+                "COMPLETE",
+                &touched,
+                "finished the work the continuation packet described",
+            ),
+        );
+    }
 }
 
 fn report_json(claim: &str, files_touched: &[String], summary: &str) -> String {

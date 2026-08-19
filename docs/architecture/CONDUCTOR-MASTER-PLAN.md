@@ -3,7 +3,7 @@
 **Version:** 1.0 (authoritative)
 **Date:** 2026-08-12
 **Supersedes:** `CONDUCTOR-ARCHITECTURE-REVIEW.md`, `CONDUCTOR-CONVERGENCE-PASS-01.md`
-**Status:** design complete. **S0–S11 implemented** (see Part 8 for per-slice state and `docs/reports/` for the evidence). This line was stale from S1 through S11 — it still read *"no implementation has begun"* after eleven slices had shipped — and is called out here because a status line nobody updates is how a document starts being read as history rather than as specification.
+**Status:** design complete. **S0–S12 implemented** (see Part 8 for per-slice state and `docs/reports/` for the evidence). This line was stale from S1 through S11 — it still read *"no implementation has begun"* after eleven slices had shipped — and is called out here because a status line nobody updates is how a document starts being read as history rather than as specification.
 
 This document is self-contained. Someone with only this file should be able to build Conductor.
 
@@ -403,6 +403,17 @@ Duplicate IDs · dangling `verified_by` references · verification IDs absent fr
 
 That last one matters most: an unbound criterion is the mechanism by which a task reaches `COMPLETE` on an agent's word. Escape hatch: mark it `manual: true`, which forces a review boundary.
 
+**Four rules the validator adds that this list does not name.** §3.7's list is closed and none of these is in it, which is why each is documented at its rule rather than smuggled in here as though it always had been. Two came from S11 (`Task::actions`, `Task::execution_requirements`); two were **inherited at S12 from the task spec ADR-0017 deleted**, because a plan became the only document that answers "what is a task?" and two of that file's five refusals had no successor:
+
+| Rule | Refuses | Why it is not merely strict |
+|---|---|---|
+| `empty_actions` (S11) | a blank `actions` entry | a blank string addresses nothing — `empty_ids`' reasoning on a different namespace |
+| `malformed_execution_requirements` (S11) | an override that parses to no requirement | `enforce::launch` refuses the same shape rather than reading it as "nothing is gated"; a mis-nested override must not silently disable a gate |
+| `blank_objective` (S12) | a task with no objective | S10 measured that `codex exec` with no prompt **blocks forever reading stdin**, so the launch refuses it — *after* approval, materialisation and a workspace clone. §3.7's philosophy is to refuse the plan, not the run |
+| `non_positive_attempt_budget` (S12) | `attempt_budget < 1` | §4.6 bounds repair by it and §5.1 defaults it to 3, so a `0` can only be deliberate — and it means "never run", which is a stall no state in §5.2 explains |
+
+The task spec's third orphaned refusal — an **empty `scope`** — is deliberately **not** restored. It already has a successor: `conductor_git`'s `Scope::contains` fails closed (*"an empty scope contains nothing, so a task that forgot to declare one halts for review rather than authorising everything"*), and `project.yaml`'s `scope_defaults` are inherited before it gets there. A rule here would be a second gate on a question already answered safely, and §3.7's own version of it — "scope globs matching no path" — needs a working tree and stays deferred (clarification 3's shape, one row down). `a_task_that_declares_no_scope_is_not_refused_here` asserts the absence, so restoring it later is a deliberate reversal rather than a drift.
+
 **Four clarifications forced by implementing this list at S11.**
 
 1. **"Forward dependencies" means declaration order, and it is kept.** It is a
@@ -427,6 +438,19 @@ That last one matters most: an unbound criterion is the mechanism by which a tas
    validator takes the catalogue as a parameter and the caller assembles it. A
    pure function that reached into the filesystem to resolve per-task profiles
    would be deciding the question rather than deferring it.
+
+   > **Settled at S12 — a path, relative to the repository root (ADR-0017).**
+   > S11's persistence step did not settle it; nothing had to. `conductor task
+   > run` finally did, and the reading is the path one: §3.1's layout holds **one**
+   > `verification.yaml` containing **one** profile, so there is no second profile
+   > for a name to select between, and named profiles would be a feature no
+   > acceptance row asks for. The validator's parameter stays exactly as described
+   > — resolution happens at `task run`, which loads the profile **before** the
+   > run row exists, so a task naming a file Conductor cannot read is a refusal
+   > (§7.2's `2`) rather than a wasted attempt and a workspace to clean up.
+   > `conductor init`'s scaffold wrote `verification_profile: default`, which
+   > resolved to `<repo>/default` and would have failed the first real run of every
+   > scaffolded project; it now writes the path.
 4. **A plan document cannot declare its own state.** `state:` is not a field of
    `plan.yaml`: §3.3 gives an agent write access to `.conductor/`, so a document
    that could say `APPROVED` would be self-approval. The state lives in the
@@ -1418,6 +1442,15 @@ trait AgentAdapter {
     fn resume_command(&self, input: &ResumeInput) -> Option<AgentCommand>;
 }
 
+struct StartInput {                      // per-attempt, never adapter state
+    run_id: RunId, task_id: TaskId, attempt_ordinal: i64,
+    workspace: PathBuf, report_path: PathBuf,
+    session_id: Option<String>,
+    instructions: String,                // §6.5's packet, rendered  (S12)
+    instructions_path: PathBuf,           // where it was stored     (S12)
+    env: BTreeMap<String, String>,       // the complete allowlist (§4.9)
+}
+
 struct FunctionalCapabilities {          // security capabilities live in
     conductor_assigned_session_id: bool, // ExecutionCapabilities (§4.2) —
     session_resume:                bool, // conflating them hides the
@@ -1429,6 +1462,17 @@ struct FunctionalCapabilities {          // security capabilities live in
 ```
 
 **`parse_event` returns `Vec<AgentEvent>`, amended at S10 — applied at S11.** It originally returned `Option<AgentEvent>`: one line, at most one event. Codex's `file_change` item carries an **array** of paths, so the adapter reported the first and silently dropped the rest, and every multi-file edit understated what the agent did. Nothing failed, because §4.8 reconciles against git, which sees all of them — which is precisely why no test could have caught it. S10's own rule ("if a scenario needs adapter-specific handling, that is a design smell to fix in the interface, not the adapter") makes this an interface change: applied across all three implementors and both supervisor call sites. *(S10's report claimed this amendment; the master plan had not received it. Found and applied by S11's amendment audit.)*
+
+**`StartInput` carries the instruction, added at S12 (ADR-0017).** The interface block above lists `StartInput` only by name, and what it held was decided by S3: run, task, attempt ordinal, workspace, report path, session id, environment. What it did **not** hold was *what the agent is being asked to do* — the Codex adapter took that at construction, through a `with_prompt`, and `conductor task run` passed the task's objective string.
+
+That could never carry a packet, for two independent reasons:
+
+1. **A packet cannot exist before the workspace does.** §6.5's implementation packet carries `repository.workspace`, and the clone happens inside the attempt — so an adapter built before the run could only ever be handed something less than a packet.
+2. **§4.6 makes the instruction differ between attempts of one run.** Attempt 2 gets a *repair* packet, whose whole purpose is the `do_not_retry` list *"that stops attempt 2 from being attempt 1 again"*. A value fixed at construction cannot express that.
+
+So `StartInput` gains `instructions: String` and `instructions_path: PathBuf` — the rendered packet, and the artifact §6.5 requires it to be stored as. They sit beside `attempt_ordinal`, which is the other field that changes per attempt. A `String` and not a packet type, deliberately: §2.3 keeps `conductor-agent` free of `conductor-run`, and §6.1 makes adapters *"pure translation"* — an adapter's job is to put the text where its CLI expects it, not to know what a packet is.
+
+**The packet is stored as a plain artifact, not through the side-effect ledger.** §4.7's ledger exists for effects Conductor cannot re-derive or that are visible outside it — *"did this already happen, and can I tell?"*. A packet is a pure function of durable state (§6.6: byte-identical for identical state), so re-deriving it answers that question with no ambiguity possible. The baseline artifact *does* go through the ledger, and the difference is real: a baseline is a **measurement at a point in time** and cannot be re-derived once the workspace has changed.
 
 **Dropped from the baseline interface:** `streamEvents`, `inspect`, `interrupt`, `terminate`, `resume` as session-object methods. Both real adapters are process launchers writing JSONL to stdout; the interface should say that.
 
@@ -1565,6 +1609,8 @@ report_schema: schemas/agent-report.v1.json
 
 **Context minimization:** decisions selected by touching the task's scope globs or explicit refs — never "all accepted decisions." Prior diffs linked by path and hash. Verification logs never embedded; failing *excerpts* only (§6.6).
 
+> **Only "explicit refs" is implemented, and that is a decision rather than a gap — S12, ADR-0016.** Matching a decision against a task's scope globs requires the *decision* to declare a scope, and §3.6 fixes decision frontmatter at four fields under `deny_unknown_fields` (*"an unknown key here is not tomorrow's feature"*); adding `scope:` there would contradict §3.6 **and** change the content-hash preimage of every decision already written. A plan document has no `deny_unknown_fields`, so the reference points the other way: `plan.yaml`'s task gains `decisions: [D-0007]`. That direction is also better on its merits — a decision cannot know which future task will need it, and the person writing the task can. A reference that does not resolve is a **refusal** naming both ids, never a silent omission: a well-formed packet missing an argument the plan says the task needs is the failure nobody would see.
+
 **Agent report** (schema-enforced via `--output-schema` / `--json-schema`):
 
 ```json
@@ -1583,7 +1629,36 @@ report_schema: schemas/agent-report.v1.json
 
 **The report is evidence, never authority.** `status: "complete"` with `reconcile() == NO_CHANGE` is `CONTRADICTED` and a finding. The schema exists to make contradiction machine-detectable, not to be believed.
 
+> **What v1 actually ships, and the divergence nobody had recorded — found at S12.** The block above is the shape this section *specified*; three fields of it are what `conductor_core::report::AgentReport` parses and what `codex exec --output-schema` enforces. Field names **and** the status vocabulary differ, and no report or ADR had noticed:
+>
+> | §6.5 above | Ships as | Why |
+> |---|---|---|
+> | `status: complete \| partial \| blocked` | `claim: COMPLETE \| PARTIAL \| FAILED` | `BLOCKED` is one of §5.2's twelve **task states**, reached only by Conductor's own eligibility refusal (row 30). Letting an agent put itself there conflates a claim with a state Conductor alone may write. |
+> | `files_changed` | `files_touched` | It is a claim, not an observation. §4.8 reads the changed set out of git; a name matching git's invites reading the agent's list as the answer. |
+> | `summary` | `summary` | — |
+> | `task_id`, `commands_run`, `acceptance_criteria`, `deviations`, `blockers`, `unverified_claims` | **not in v1** | Every one of them is a *review* input, and their only consumer is §6.5's review packet, which **S13 owns**. Asking an agent to produce a field nothing reads is exactly the no-op knob CLAUDE.md forbids, so they are deferred to the slice that would consume them rather than shipped as decoration. |
+>
+> Nothing acceptance-suite-visible depends on the deferred fields: rows 5 (`REPORT_UNPARSEABLE`) and 6 (false success) are the two rows the report participates in, and both are decided by `claim` plus reconciliation.
+>
+> **The schema is one artifact, and it is `schemas/agent-report.v1.json`.** It did not exist as a file until S12 — the shape lived only as a string literal in the Codex adapter, while this section named a path — so `conductor_agent::codex::REPORT_SCHEMA_JSON` now `include_str!`s it and the crate does not build without it.
+>
+> **`report_schema` in the packet is an identifier, not a path.** As a path it could not resolve for anybody: a packet is generated for the *user's* project, so `schemas/agent-report.v1.json` resolves against their tree, where no such file exists — while the schema an agent is held to is the copy the launch path writes into the run's artifact tree. The field now carries the schema's `$id` (`agent-report.v1`); handing the agent the file is the adapter mechanism's job, and the path belongs there.
+
 **Repair packet** adds only: failing check IDs · the failure fingerprint · a bounded log excerpt (first failing assertion + 40 lines, never the full log) · the diff of what the previous attempt changed · attempt ordinal and remaining budget · an explicit `do_not_retry` list of approaches already tried. That last field is what stops attempt 2 from being attempt 1 again.
+
+> **Which of the three packets an attempt gets — settled at S12 (ADR-0018).** This section defines three packets and never says who receives which. Part 9 does, across three rows, and the discriminator is **how the previous attempt ended** — not what verification said about it:
+>
+> | row | previous attempt | next attempt is told |
+> |---|---|---|
+> | 2 | crashed, nothing survived | *"new attempt, **same packet**"* — the implementation packet |
+> | 3 | crashed, work survived | *"verify current tree; **continuation packet**"* |
+> | 7 | **exited**, verification failed | the repair packet |
+>
+> The verification result cannot be the discriminator, and that is the subtle part: `repair::observation::observe` gives a verification failure precedence over the attempt's terminal state, so a crash whose surviving work then fails a check is `ObservationKind::Failed` — indistinguishable from row 7 by kind alone. What separates them is whether an agent ever **finished a turn**. An agent that exited made choices that can be wrong, and `do_not_retry` is about not repeating them; an agent that died made no choices worth avoiding, and its successor needs to know what is already in the tree. `attempt.outcome` is durable, so the distinction survives the restart §4.7 exists for.
+>
+> Row 2's boundary is measured, not assumed: `continuation::observe_run` re-observes the workspace against the baseline the dead attempt stored and classifies it, exactly as §4.7's recovery does, and an *empty* observed half falls back to the implementation packet. Writing `CLEAN_NO_REPORT` from §4.8's table without looking would be wrong for the crash that also touched `.conductor/**` or moved a remote.
+>
+> `Observed` also carries **`changed_paths`**, which this section does not name: *"the actual diff so far"* has a "how much" half and a "where" half, and a stat line alone leaves a continuing agent to search the tree for its predecessor's work. Paths only — the contents stay linked, so the budget is unaffected.
 
 **Continuation packet** = implementation packet **plus observed reality**: `reconciliation_verdict`, current tree hash vs base, the actual diff so far, which criteria already verify green at the current tree, commits in the run clone, the partial report if any, and explicitly:
 
@@ -1863,6 +1938,15 @@ clean exit.
 **Dependencies.** S1–S4.
 **Scope.** Task state machine · minimal task-spec file (not yet the plan ledger) · Conductor-owned commit via the side-effect ledger · git trailers (§3.4) · fetch of the run branch into the source repo · `conductor task run/show/list`.
 **Out of scope.** Policy, approvals, repair, real agents, plan versioning.
+
+> **The task-spec file was deleted at S12 (ADR-0017), five slices after the slice
+> that was meant to replace it.** `conductor_run::spec` and
+> `conductor_core::task::{TaskSpec, ValidatedTaskSpec, TaskSpecError}` are gone,
+> along with `task run --spec`. The module's own doc comment had said *"S11 deletes
+> this"* since S5; S11 shipped the ledger and left the stopgap reachable, which is
+> the whole of ADR-0017's finding. Recorded here rather than by editing this scope
+> line, because S5's scope was correct for S5 — a stopgap is not a defect until the
+> thing meant to replace it has landed and it is still the path in use.
 **Files.** `crates/conductor-core/src/task.rs`, `crates/conductor-run/src/effects.rs`, `crates/conductor-cli/src/task.rs`.
 **Tests.** Happy path · `RUNNING→COMPLETE` rejected without reconciliation · false-success report → `CONTRADICTED`.
 **Failure injection.** Kill **between** intent and effect, and between effect and confirm, for both commit and fetch.
@@ -2075,16 +2159,43 @@ blank, folded into `config_hash` — and never read, while `conductor task run
 --adapter` defaulted to `fake`. Fixed here rather than deferred; see §4.2's
 adapter clause.)*
 
+> **What S11 did NOT do, found at S12 — ADR-0017.** Everything above is true and
+> none of it was reachable from §7.1's core verb. `conductor task run` still read
+> the S5-era `.conductor/task.yaml` and wrote its own `plan_version` row at
+> `version 0`, `state DRAFT`, so on the product path §4.3's approval gate never
+> ran, `task.declared_actions` and `task.execution_requirements` were `NULL` (and
+> both §4.2 gates therefore compared nothing), §5.2's dependency edge had no list
+> to consult, §5.2's restart clause described a check nothing performed, and
+> acceptance row 21 had no product path at all. `materialize` had no call site
+> outside tests and `conductor recover`.
+>
+> S11 is **not** reopened: its scope line is a ledger and its stop point is
+> "project truth outlives execution state", and both hold. What it did not carry
+> was the connection, because nothing in its own Tests or Verify lines asked for
+> one — which is exactly how a slice can be complete and a product still be
+> broken. The correction is S12's, and it is recorded there rather than here so
+> that "S11 COMPLETE" is not read as "the product path used it".
+
 ---
 
-### S12 — Packets and reports
+### S12 — Packets and reports  ✅ **COMPLETE 2026-08-17**
 
 **Objective.** Generate every packet from durable state.
 **Dependencies.** S11, S10.
-**Scope.** Implementation, repair, continuation packets · report schema · context minimization · evidence linking · determinism.
-**Tests.** **The same state produces a byte-identical packet twice** · packet size budget enforced · continuation packet regenerable after total process restart.
-**Verify.** An agent handed **only** a continuation packet completes a task interrupted mid-way, on a fixture, **with no session resume**.
+**Scope.** Implementation, repair, continuation packets · report schema · context minimization · evidence linking · determinism · **`conductor task run` claims a task materialized from an approved plan version (added at S12, ADR-0017)**.
+**Tests.** **The same state produces a byte-identical packet twice** · packet size budget enforced · continuation packet regenerable after total process restart · **an unapproved plan runs nothing, and an approved one runs, through the shipped binary**.
+**Verify.** An agent handed **only** a continuation packet completes a task interrupted mid-way, on a fixture, **with no session resume**. ✅ `s12_verify_line_a_fresh_agent_finishes_from_the_continuation_packet_alone`, with the continuation route mutated out to prove it is load-bearing.
 **Stop point.** Recovery does not depend on hidden state.
+
+> **Why the core verb is in S12's scope at all.** It was not in the original scope
+> line. S12 is the slice that has to hand a *plan-derived* packet to an agent, and
+> `packet::implementation::build` reads the plan document at
+> `.conductor/plans/vN/plan.yaml` — which a spec-created run does not have, because
+> its fabricated `plan_version` names `.conductor/task.yaml` at `version 0`. The
+> packet could not reach an agent until the verb it launches from used the ledger,
+> so the integration is a prerequisite rather than an adjacent improvement. See
+> ADR-0017 for the seven mechanisms it made reachable and the two defects it
+> exposed (row 30's exit code, and `verification_profile`'s reading).
 
 ---
 
@@ -2216,6 +2327,27 @@ that an effect Conductor cannot decide is recorded `AMBIGUOUS` and halts, rather
 being overwritten. `a_ref_conductor_did_not_move_is_noticed_rather_than_overwritten` is
 that test, and it was falsified (reducing the precondition to two values makes it fail
 with a non-fast-forward rejection). Keep both.
+
+**Note on rows 21 and 30 — scored from unit and library evidence until S12 (ADR-0017).**
+Both rows were implemented and neither was reachable through §7.1's core verb, because
+`conductor task run` created its own task row from `.conductor/task.yaml` and its own
+`plan_version` row at `version 0`. Row 21 needs a *versioned* plan and a supersession,
+and nothing on the product path created either — `materialize` had no call site outside
+tests and `conductor recover`. Row 30's refusal *was* wired at S9 and its persisted state
+was correct, but `task run` mapped the library's `Err` to §7.2's `1`, so a wrapper script
+could not tell "ineligible execution mode" from a crash and `--json` printed nothing at
+all — the `CRITICAL` finding the refusal exists to leave behind was invisible at the
+boundary that produced it.
+
+S12 wires both. Row 21's supersession now happens where it belongs, at `plan approve`,
+and is scored from `approving_a_new_version_supersedes_untouched_tasks_and_carries_the_finished_one`
+— which drives two real approvals and one real run through the binary. Row 30 is scored
+from `a_plan_declared_execution_requirement_blocks_an_unmeasured_host`, which declares
+`filesystem_write: hard` in `plan.yaml`, observes exit `3`, `state: BLOCKED`, zero
+`attempt` rows and a finding naming the dimension. Both live in
+`crates/conductor-cli/tests/task_run_plan.rs`. Before S12 the honest score for row 21
+was **library-only** and for row 30 **state-correct, exit-code wrong**; the earlier
+`PASS` for row 30 in S9's report is corrected in S12's.
 
 ---
 

@@ -81,7 +81,15 @@ fn main() {
         workspaces_root: root.join("workspaces"),
         artifacts_root: root.join("artifacts"),
         quarantine_root: root.join("quarantine"),
-        profile_path: root.join("verification.yaml"),
+        // §3.1's location, inside the registered tree. It moved here at S12 with
+        // the rest of the fixture: §4.5's clarification 3 settles
+        // `verification_profile` as a path relative to the repository root, and a
+        // harness reading a *second* copy beside the store would be measuring a
+        // profile no run is judged by.
+        profile_path: root
+            .join("source")
+            .join(".conductor")
+            .join("verification.yaml"),
         scratch_index: root.join("scratch").join("index"),
         supervisor: SupervisorConfig {
             // Generous on purpose: what this binary injects is a kill of
@@ -113,6 +121,8 @@ fn main() {
             "n/a",
             "unprobed",
         ),
+        // The worker derives §6.5's implementation packet — this is not a repair.
+        instructions: None,
     };
 
     let mut observer = KillAt {

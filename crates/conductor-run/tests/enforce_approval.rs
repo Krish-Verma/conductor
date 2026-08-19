@@ -136,6 +136,8 @@ fn config(world: &World) -> VerticalConfig {
             "n/a",
             "test-os-1",
         ),
+        // The worker derives §6.5's implementation packet — this is not a repair.
+        instructions: None,
     }
 }
 

@@ -10,6 +10,12 @@
 //!
 //! Approvals (S8), enforcement (S9) and packets (S12) belong to the slices that
 //! own them and are deliberately absent.
+//!
+//! S12 removed `spec`, which loaded S5's `.conductor/task.yaml`. Its own doc
+//! comment said "S11 deletes this" and S11 did not; what replaced it is
+//! [`plan`] — the ledger, the materializer and [`plan::runnable`] — so a task's
+//! definition now has exactly one source. See `conductor_core::task` for the
+//! types that went with it.
 
 pub mod approval;
 pub mod containment;
@@ -17,12 +23,12 @@ pub mod decision;
 pub mod effects;
 pub mod enforce;
 pub mod lease;
+pub mod packet;
 pub mod paths;
 pub mod plan;
 pub mod policy;
 pub mod recovery;
 pub mod repair;
-pub mod spec;
 pub mod supervise;
 pub mod verify;
 pub mod vertical;

@@ -322,6 +322,11 @@ fn config(world: &World) -> VerticalConfig {
         probe_key: conductor_run::containment::cache::ProbeKey::new(
             "fake", "test", "none", "n/a", "unprobed",
         ),
+        // `None` is right even here: the *driver* sets it per repair attempt,
+        // composing §6.5's repair packet onto the implementation packet. A value
+        // supplied by the caller would be the same instruction for every attempt,
+        // which is the defect S12 found.
+        instructions: None,
     }
 }
 
@@ -973,6 +978,92 @@ fn attempt_two_is_given_a_packet_that_names_what_attempt_one_already_tried() {
 }
 
 #[test]
+fn the_repair_packet_is_what_attempt_two_was_actually_told() {
+    // The other half of the test above, and the half that was missing until S12.
+    //
+    // That test asserts the packet is **composed** correctly — from the value the
+    // driver returns. It says nothing about whether the agent ever saw it, and it
+    // did not: the driver built the packet, returned it in `Attempted { packet }`
+    // for reporting, and launched the attempt with whatever the caller had
+    // configured. Every attempt of a run therefore got the same instruction, which
+    // is precisely what §6.5's `do_not_retry` list exists to prevent — a defect of
+    // exactly ADR-0017's kind, one layer down.
+    //
+    // So this reads the **artifact the attempt was given** (§6.5: every packet is
+    // "stored as an artifact") and asserts the repair fields are in it.
+    warm_the_binary();
+    let world = World::new().with_profile(CONTENT_FAILURE_PROFILE);
+    let agent = HostileAgent::new(&world.root(), Hostility::AlwaysFailsIdentically);
+    let repair = RepairConfig::default();
+    let vertical = config(&world);
+    let mut store = world.store();
+
+    repair_once(&mut store, &agent, &vertical, &repair, &mut ()).expect("attempt 1");
+    repair_once(&mut store, &agent, &vertical, &repair, &mut ()).expect("attempt 2");
+    drop(store);
+
+    let packet_for = |ordinal: i64| -> String {
+        let path = world
+            .artifacts()
+            .join(RUN)
+            .join(ordinal.to_string())
+            .join("packet.yaml");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("§6.5 stores every packet: {} — {e}", path.display()))
+    };
+
+    let one = packet_for(1);
+    let two = packet_for(2);
+
+    // POSITIVE CONTROL, and it is the point: attempt 1 is an implementation
+    // packet with nothing to avoid. Without this, "attempt 2 has do_not_retry"
+    // would be satisfied by both attempts getting the same repair-shaped packet.
+    assert!(
+        one.contains("packet: implementation"),
+        "attempt 1 gets §6.5's implementation packet: {one}"
+    );
+    assert!(
+        !one.contains("do_not_retry"),
+        "attempt 1 has nothing to not retry: {one}"
+    );
+
+    // Attempt 2 is the composed repair packet: §6.5's six added fields **plus**
+    // the implementation packet, because the section says it "adds only" them.
+    assert!(
+        two.contains("packet: repair"),
+        "attempt 2 gets §6.5's repair packet: {two}"
+    );
+    for added in [
+        "do_not_retry",
+        "failing_checks",
+        "fingerprint",
+        "remaining_budget",
+        "previous_diff",
+        "excerpt",
+    ] {
+        assert!(
+            two.contains(added),
+            "§6.5's repair packet adds {added:?}, and what attempt 2 was told \
+             does not carry it: {two}"
+        );
+    }
+    // "Adds only" — the implementation half is still there, so a repairing agent
+    // still knows the objective and what proves the task done.
+    for base in ["objective", "acceptance_criteria", "verification", "scope"] {
+        assert!(
+            two.contains(base),
+            "the repair packet must ADD to the implementation packet, not replace \
+             it; {base:?} is missing: {two}"
+        );
+    }
+    // And it names what attempt 1 actually did, from durable state.
+    assert!(
+        two.contains("unit-tests"),
+        "the failing check id travels: {two}"
+    );
+}
+
+#[test]
 fn attempt_two_is_never_handed_a_session_the_adapter_cannot_resume() {
     // The other half of §4.6's session rule, asserted on the durable row rather
     // than on the decision: `attempt.agent_session_id` is what a restart reads,
@@ -999,6 +1090,246 @@ fn attempt_two_is_never_handed_a_session_the_adapter_cannot_resume() {
         .map(|r| r.expect("row"))
         .collect();
     assert_eq!(sessions, vec![None, None]);
+}
+
+#[test]
+fn row_3_a_crash_after_edits_gives_the_next_attempt_a_continuation_packet() {
+    // Part 9's rows 2, 3 and 7 specify three packets between them, and the
+    // difference is what survived:
+    //
+    //   row 2  crash before edits   NO_CHANGE        "new attempt, **same packet**"
+    //   row 3  crash after edits    CLEAN_NO_REPORT  "verify current tree; **continuation packet**"
+    //   row 7  verification failure FAIL             §4.6's repair packet
+    //
+    // Until S12 all three got the same instruction, because nothing delivered a
+    // packet at all (ADR-0018). Row 7 was wired first; this is row 3.
+    //
+    // §6.5 makes the continuation packet the implementation packet **plus observed
+    // reality**, and the reason it is a *different* packet from the repair one is
+    // the sentence it carries verbatim: the previous agent's reasoning is gone, so
+    // its intent is inferable only from the diff. A repairing agent is told what to
+    // avoid; a continuing agent is told what is already there.
+    warm_the_binary();
+    // A profile whose required check fails, so the surviving-but-unfinished work
+    // does **not** satisfy verification. With a passing profile the run would reach
+    // `COMPLETE` on attempt 1 — which is row 3's other, happier branch ("verify
+    // current tree", and it was enough) and leaves no second attempt to inspect.
+    let world = World::new().with_profile(CONTENT_FAILURE_PROFILE);
+    let dir = world.root().join("hostile");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    // Attempt 1 writes a file and *then* dies: work survives, no report exists.
+    std::fs::write(
+        dir.join("scenario-1.json"),
+        r#"{"id":"crash-after-edits","steps":[
+             {"step":"write_file","path":"src/half-done.rs","contents":"pub fn half() -> u32 { 1 }\n"},
+             {"step":"checkpoint","name":"after-edits"},
+             {"step":"kill_self","signal":9}]}"#,
+    )
+    .expect("write");
+    std::fs::write(
+        dir.join("scenario-2.json"),
+        r#"{"id":"finishes","steps":[
+             {"step":"write_file","path":"src/added.rs","contents":"pub fn done() -> u32 { 1 }\n"},
+             {"step":"exit","code":0}]}"#,
+    )
+    .expect("write");
+
+    let agent = HostileAgent {
+        binary: fake_agent_binary(),
+        scenarios: vec![dir.join("scenario-1.json"), dir.join("scenario-2.json")],
+        marker: world.root().join("spawn-marker.log"),
+        commands_built: AtomicUsize::new(0),
+    };
+    let repair = RepairConfig::default();
+    let vertical = config(&world);
+    let mut store = world.store();
+
+    repair_once(&mut store, &agent, &vertical, &repair, &mut ()).expect("attempt 1");
+    repair_once(&mut store, &agent, &vertical, &repair, &mut ()).expect("attempt 2");
+    drop(store);
+
+    let packet_for = |ordinal: i64| -> String {
+        let path = world
+            .artifacts()
+            .join(RUN)
+            .join(ordinal.to_string())
+            .join("packet.yaml");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("§6.5 stores every packet: {} — {e}", path.display()))
+    };
+
+    let one = packet_for(1);
+    let two = packet_for(2);
+
+    // POSITIVE CONTROL: attempt 1 had no history, so it got the implementation
+    // packet. Without this, "attempt 2 continues" would be satisfied by both
+    // attempts getting the same continuation-shaped document.
+    assert!(
+        one.contains("packet: implementation"),
+        "attempt 1 gets §6.5's implementation packet: {one}"
+    );
+
+    // Row 3's packet, and it is a continuation rather than a repair: nothing
+    // failed verification, so there is nothing to *avoid* — there is work to
+    // *continue*.
+    assert!(
+        two.contains("packet: continuation"),
+        "a crash that left work behind continues rather than repairs: {two}"
+    );
+    assert!(
+        !two.contains("do_not_retry"),
+        "nothing was tried and rejected, so there is nothing to not retry: {two}"
+    );
+
+    // §6.5's verbatim sentence — S12's stop point, written as a line the agent
+    // reads.
+    assert!(
+        two.contains("The previous agent's reasoning is not available"),
+        "the continuation packet must say what is missing: {two}"
+    );
+
+    // …and observed reality: what is already in the tree.
+    assert!(
+        two.contains("observed"),
+        "a continuation packet is the implementation packet plus observed reality: {two}"
+    );
+    assert!(
+        two.contains("half-done.rs"),
+        "the work attempt 1 left behind must be visible to attempt 2: {two}"
+    );
+}
+
+/// A required check that passes exactly when the objective's file exists.
+///
+/// The Verify line needs verification to fail while the work is unfinished and pass
+/// once it is done — otherwise attempt 1 either completes (nothing to continue) or
+/// nothing ever completes (nothing to prove).
+const GREETING_PROFILE: &str = r#"
+verification:
+  toolchain_fingerprint:
+    - ["/bin/echo", "toolchain-v1"]
+  required:
+    - id: unit-tests
+      command: ["/bin/sh", "-c", "test -f src/greeting.rs"]
+      timeout_seconds: 60
+"#;
+
+#[test]
+fn s12_verify_line_a_fresh_agent_finishes_from_the_continuation_packet_alone() {
+    // **S12's stop point.**
+    //
+    // > An agent handed **only** a continuation packet completes a task interrupted
+    // > mid-way, on a fixture, **with no session resume**.
+    //
+    // Every clause is load-bearing, so each is arranged rather than asserted at the
+    // end:
+    //
+    // * *interrupted mid-way* — attempt 1 writes a scratch file and is `SIGKILL`ed.
+    //   Work survives; no report exists; the required check still fails, so the run
+    //   stays alive.
+    // * *a continuation packet* — the driver routes a crashed attempt's successor to
+    //   §6.5's continuation packet (Part 9 row 3), and the worker stores it.
+    // * *handed **only*** — attempt 2's scenario is a single `finish_from_packet`
+    //   step, which takes **no parameters**: it reads `CONDUCTOR_FAKE_PACKET` and
+    //   derives the file to write from the packet's own `objective`. A scripted
+    //   `write_file` would have proved the *scenario* was sufficient, which is the
+    //   vacuity ADR-0006 is about.
+    // * *no session resume* — `HostileAgent::capabilities` reports
+    //   `session_resume: false`, so §4.6's `session_id_for` cannot hand one back;
+    //   the assertion below checks the attempt row recorded none.
+    //
+    // What this does **not** prove is that a reasoning agent can use the packet.
+    // It proves the packet carries enough, and that finishing needs no state the
+    // dead process took with it — which is exactly "recovery does not depend on
+    // hidden state".
+    warm_the_binary();
+    let world = World::new().with_profile(GREETING_PROFILE);
+    let dir = world.root().join("hostile");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(
+        dir.join("scenario-1.json"),
+        r#"{"id":"interrupted","steps":[
+             {"step":"emit","kind":"agent.started","detail":"working"},
+             {"step":"write_file","path":"src/scratch.rs","contents":"// half a thought\n"},
+             {"step":"checkpoint","name":"after-edits"},
+             {"step":"kill_self","signal":9}]}"#,
+    )
+    .expect("write");
+    // Attempt 2: one step, no parameters. The packet is its entire input.
+    std::fs::write(
+        dir.join("scenario-2.json"),
+        r#"{"id":"continues","steps":[
+             {"step":"finish_from_packet"},
+             {"step":"exit","code":0}]}"#,
+    )
+    .expect("write");
+
+    let agent = HostileAgent {
+        binary: fake_agent_binary(),
+        scenarios: vec![dir.join("scenario-1.json"), dir.join("scenario-2.json")],
+        marker: world.root().join("spawn-marker.log"),
+        commands_built: AtomicUsize::new(0),
+    };
+    let repair = RepairConfig::default();
+    let vertical = config(&world);
+    let mut store = world.store();
+
+    let first = repair_once(&mut store, &agent, &vertical, &repair, &mut ()).expect("attempt 1");
+    let Step::Attempted(one) = &first else {
+        panic!("attempt 1 must have run: {first:?}");
+    };
+    assert_eq!(
+        one.vertical.attempt.attempt_state,
+        AttemptState::Crashed,
+        "the interruption must be a crash, not a clean exit"
+    );
+
+    let second = repair_once(&mut store, &agent, &vertical, &repair, &mut ()).expect("attempt 2");
+    drop(store);
+
+    // The packet attempt 2 was given, read from where §6.5 says it is stored.
+    let packet = std::fs::read_to_string(world.artifacts().join(RUN).join("2").join("packet.yaml"))
+        .expect("§6.5 stores every packet");
+    assert!(
+        packet.contains("packet: continuation"),
+        "row 3 hands a crash's successor a continuation packet: {packet}"
+    );
+    assert!(
+        packet.contains("The previous agent's reasoning is not available"),
+        "and it says what is missing: {packet}"
+    );
+    assert!(
+        packet.contains("src/scratch.rs"),
+        "…and what attempt 1 left behind: {packet}"
+    );
+
+    // The task completed, and the file the packet asked for is the one that exists.
+    assert!(
+        matches!(second, Step::Complete(_)),
+        "the task must reach COMPLETE from the packet alone: {second:?}"
+    );
+    assert_eq!(
+        world.task_state(),
+        TaskState::Complete,
+        "…and the store must agree, which is the only authority that counts"
+    );
+    assert!(
+        world.workspace().join("src/greeting.rs").exists(),
+        "the work the packet's objective named was not done"
+    );
+
+    // "No session resume", as the database holds it — not as the adapter promised.
+    let sessions: Vec<Option<String>> = world
+        .store()
+        .attempts_for_run(&run_id())
+        .expect("attempts")
+        .into_iter()
+        .map(|a| a.agent_session_id)
+        .collect();
+    assert!(
+        sessions.iter().all(Option::is_none),
+        "a session id was carried across the interruption: {sessions:?}"
+    );
 }
 
 /// Keeps `Store` in scope for the assertions that open one directly.

@@ -45,6 +45,38 @@ pub struct StartInput {
     /// A session id Conductor assigned, for adapters that accept one (§6.1's
     /// `conductor_assigned_session_id` capability).
     pub session_id: Option<String>,
+    /// What the agent is being asked to do — §6.5's packet, rendered.
+    ///
+    /// # Why this is per-attempt input and not adapter configuration (S12)
+    ///
+    /// It used to be neither: `CodexAgent::with_prompt` took a string at
+    /// *construction*, and `conductor task run` passed the task's objective. Two
+    /// things were wrong with that, and the second is the one §6.5 cares about.
+    ///
+    /// A packet cannot be built before the workspace exists — §6.5's
+    /// implementation packet carries `repository.workspace`, and the clone
+    /// happens inside the attempt — so an adapter built before the run could only
+    /// ever have been handed something *less* than a packet. And §4.6 makes the
+    /// instruction differ **between attempts of one run**: attempt 2 gets a repair
+    /// packet, whose whole purpose is the `do_not_retry` list that stops it from
+    /// being attempt 1 again. A value fixed at construction cannot express that,
+    /// so it lives here, beside `attempt_ordinal`, which is the other thing that
+    /// changes per attempt.
+    ///
+    /// A `String` and not a packet type, deliberately: §2.3 keeps this crate free
+    /// of `conductor-run`, and §6.1 makes adapters *"pure translation"*. An
+    /// adapter's job is to put this text where its CLI expects it, not to know
+    /// what a packet is.
+    pub instructions: String,
+    /// Where [`instructions`](Self::instructions) was written as an artifact.
+    ///
+    /// §6.5 requires every packet to be *"stored as an artifact"*, so the file
+    /// exists whether or not an adapter uses the path. It travels because an
+    /// adapter whose CLI takes an instruction *file* rather than an argument
+    /// would otherwise have to write one — which §6.1 forbids it from doing —
+    /// and because it is what lets a test assert that what reached the agent is
+    /// byte-identical to what was stored.
+    pub instructions_path: PathBuf,
     /// The **complete** environment the child will run with.
     ///
     /// An allowlist, not additions to the parent's environment (§4.9: "Not a

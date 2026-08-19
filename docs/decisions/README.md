@@ -61,6 +61,9 @@ copies of a number are two things that can disagree.
 | [ADR-0013](ADR-0013-completion-criterion-7-was-unreachable-behind-criterion-6.md) | Completion criterion 7 was unreachable behind criterion 6 | ACCEPTED |
 | [ADR-0014](ADR-0014-out-of-scope-could-not-express-unconditionally.md) | `OUT_OF_SCOPE` could not express "unconditionally" | ACCEPTED |
 | [ADR-0015](ADR-0015-approval-survives-the-store-as-a-receipt.md) | Approval survives the store as a receipt, not as a re-decision | ACCEPTED |
+| [ADR-0016](ADR-0016-context-minimization-had-only-one-implementable-half.md) | §6.5's context minimization had only one implementable half | ACCEPTED |
+| [ADR-0017](ADR-0017-the-core-verb-never-used-the-plan-ledger.md) | The core verb never used the plan ledger | ACCEPTED |
+| [ADR-0018](ADR-0018-the-packets-were-built-and-never-delivered.md) | The packets were built and never delivered | ACCEPTED |
 
 *(ADR-0008 through ADR-0014 were absent from this index until S11 — the records
 existed, the table stopped at 0007. Recorded rather than silently fixed: an index
